@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -58,7 +59,7 @@ func pidPath() string {
 	return filepath.Join(defaultDir(), "ai-proxy-pool.pid")
 }
 
-func setupLogger(path string) (*os.File, error) {
+func setupLogger(path string, daemon bool) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create log dir: %w", err)
 	}
@@ -66,7 +67,13 @@ func setupLogger(path string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open log file: %w", err)
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(f, nil)))
+
+	var w io.Writer = f
+	if !daemon {
+		// 前台运行：同时输出到 stdout 和日志文件
+		w = io.MultiWriter(os.Stdout, f)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, nil)))
 	return f, nil
 }
 
@@ -128,8 +135,10 @@ func main() {
 		daemonize()
 	}
 
+	isDaemon := os.Getenv("_AI_PROXY_POOL_DAEMON") == "1"
+
 	logPath := resolveLogPath()
-	logFile, err := setupLogger(logPath)
+	logFile, err := setupLogger(logPath, isDaemon)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "setup logger failed: %v\n", err)
 		os.Exit(1)
