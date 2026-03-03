@@ -1,5 +1,5 @@
 # Binaries
-ai-proxy-pool
+/ai-proxy-pool
 *.exe
 *.exe~
 *.dll
