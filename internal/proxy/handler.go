@@ -112,7 +112,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if model != "" && len(selected.ModelMapping) > 0 {
 		if mapped, ok := selected.ModelMapping[model]; ok {
 			upstreamModel = mapped
-			body = replaceModel(body, model, mapped)
+			body = replaceModel(body, mapped)
 			slog.Info("model mapped", "provider", selected.Name, "from", model, "to", mapped)
 		}
 	}
@@ -342,7 +342,7 @@ func extractModel(body []byte, contentType string) string {
 	return modelString
 }
 
-func replaceModel(body []byte, from, to string) []byte {
+func replaceModel(body []byte, to string) []byte {
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body
