@@ -13,6 +13,9 @@ Go 实现的 Claude 多供应商智能代理服务。
   - 按 `path_prefix`
 - 模型映射：每个 provider 可配置模型名替换规则
 - 自动注入上游鉴权（`auth_token`/`bearer`/`x-api-key`）
+- 自动重试：5xx 错误或网络异常时自动切换到其他 provider
+- 热重载：配置文件修改后自动生效，无需重启
+- Prometheus 指标：`GET /metrics`
 - 后台守护进程模式（`-d`）
 - 日志文件输出
 - 结构化请求/响应日志（含状态码、耗时、路由到的 provider）
@@ -82,13 +85,12 @@ curl -sS http://127.0.0.1:8080/v1/messages \
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `-config` | 配置文件路径 | 自动查找（见下方） |
+| `-config` | 配置文件路径 | `~/.ai_proxy_pool/config.yaml` |
 | `-d` | 后台守护进程运行 | `false` |
+| `-stop` | 停止后台守护进程 | `false` |
 | `-log` | 日志文件路径 | `~/.ai_proxy_pool/ai-proxy-pool.log` |
 
-**配置文件查找顺序**（未指定 `-config` 时）：
-1. `./config.yaml`（当前目录）
-2. `~/.ai_proxy_pool/config.yaml`
+**配置文件默认路径**：`~/.ai_proxy_pool/config.yaml`（可通过 `-config` 覆盖）
 
 ## 配置说明
 
@@ -103,6 +105,9 @@ curl -sS http://127.0.0.1:8080/v1/messages \
 | `upstream_timeout` | 上游请求超时 | `300s` |
 | `auth.enabled` | 启用代理入口认证 | `false` |
 | `auth.token` | 认证 Token（支持 `${ENV}`） | - |
+| `retry.max_attempts` | 最大重试次数（含首次） | `3` |
+| `retry.retry_on_5xx` | 5xx 响应时重试 | `true` |
+| `retry.retry_on_network` | 网络错误时重试 | `true` |
 
 ### Router
 
@@ -160,7 +165,15 @@ make install  # 安装到 $GOPATH/bin
 ### 停止后台进程
 
 ```bash
-kill $(cat ~/.ai_proxy_pool/ai-proxy-pool.pid)
+ai-proxy-pool -stop
+```
+
+### 热重载配置
+
+配置文件修改后会自动重载，也可手动触发：
+
+```bash
+kill -HUP $(cat ~/.ai_proxy_pool/ai-proxy-pool.pid)
 ```
 
 ### 查看日志
