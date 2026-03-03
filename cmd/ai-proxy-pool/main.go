@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -14,13 +15,33 @@ import (
 	"github.com/hiyongliz/ai-proxy-pool/internal/proxy"
 )
 
-func main() {
-	cfgPath := flag.String("config", "config.yaml", "path to config file")
+func resolveConfigPath() string {
+	cfgPath := flag.String("config", "", "path to config file")
 	flag.Parse()
 
-	cfg, err := config.Load(*cfgPath)
+	if *cfgPath != "" {
+		return *cfgPath
+	}
+
+	// 未指定时，依次尝试当前目录和 home 目录
+	if _, err := os.Stat("config.yaml"); err == nil {
+		return "config.yaml"
+	}
+
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".ai_proxy_pool", "config.yaml")
+	}
+
+	return "config.yaml"
+}
+
+func main() {
+	cfgPath := resolveConfigPath()
+
+	slog.Info("using config", "path", cfgPath)
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		slog.Error("load config failed", "error", err)
+		slog.Error("load config failed", "path", cfgPath, "error", err)
 		os.Exit(1)
 	}
 
