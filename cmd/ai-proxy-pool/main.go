@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
 	"github.com/hiyongliz/ai-proxy-pool/internal/metrics"
 	"github.com/hiyongliz/ai-proxy-pool/internal/proxy"
@@ -210,6 +212,70 @@ func main() {
 
 	handler := proxy.NewReloadableHandler(server)
 
+	// 配置热重载函数
+	reloadConfig := func(trigger string) {
+		slog.Info("reloading config", "trigger", trigger, "path", cfgPath)
+
+		newCfg, err := config.Load(cfgPath)
+		if err != nil {
+			metrics.ConfigReloadsTotal.WithLabelValues("failure").Inc()
+			slog.Error("config reload failed, keeping current config", "error", err)
+			return
+		}
+
+		if newCfg.Server.ListenAddr != cfg.Server.ListenAddr {
+			slog.Warn("listen_addr changed, requires full restart to take effect",
+				"old", cfg.Server.ListenAddr,
+				"new", newCfg.Server.ListenAddr,
+			)
+		}
+
+		newServer, err := proxy.NewServer(newCfg)
+		if err != nil {
+			metrics.ConfigReloadsTotal.WithLabelValues("failure").Inc()
+			slog.Error("server rebuild failed, keeping current config", "error", err)
+			return
+		}
+
+		handler.Reload(newServer)
+		cfg = newCfg
+		metrics.ConfigReloadsTotal.WithLabelValues("success").Inc()
+		slog.Info("config reloaded successfully")
+	}
+
+	// 启动文件监听
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		slog.Error("failed to create file watcher", "error", err)
+	} else {
+		defer watcher.Close()
+		if err := watcher.Add(cfgPath); err != nil {
+			slog.Error("failed to watch config file", "path", cfgPath, "error", err)
+		} else {
+			slog.Info("watching config file for changes", "path", cfgPath)
+			go func() {
+				for {
+					select {
+					case event, ok := <-watcher.Events:
+						if !ok {
+							return
+						}
+						if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
+							// 延迟一点，等待文件写入完成
+							time.Sleep(100 * time.Millisecond)
+							reloadConfig("file_change")
+						}
+					case err, ok := <-watcher.Errors:
+						if !ok {
+							return
+						}
+						slog.Error("file watcher error", "error", err)
+					}
+				}
+			}()
+		}
+	}
+
 	httpServer := &http.Server{
 		Addr:         cfg.Server.ListenAddr,
 		Handler:      handler,
@@ -230,33 +296,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	for sig := range sigCh {
 		if sig == syscall.SIGHUP {
-			slog.Info("received SIGHUP, reloading config", "path", cfgPath)
-
-			newCfg, err := config.Load(cfgPath)
-			if err != nil {
-				metrics.ConfigReloadsTotal.WithLabelValues("failure").Inc()
-				slog.Error("config reload failed, keeping current config", "error", err)
-				continue
-			}
-
-			if newCfg.Server.ListenAddr != cfg.Server.ListenAddr {
-				slog.Warn("listen_addr changed, requires full restart to take effect",
-					"old", cfg.Server.ListenAddr,
-					"new", newCfg.Server.ListenAddr,
-				)
-			}
-
-			newServer, err := proxy.NewServer(newCfg)
-			if err != nil {
-				metrics.ConfigReloadsTotal.WithLabelValues("failure").Inc()
-				slog.Error("server rebuild failed, keeping current config", "error", err)
-				continue
-			}
-
-			handler.Reload(newServer)
-			cfg = newCfg
-			metrics.ConfigReloadsTotal.WithLabelValues("success").Inc()
-			slog.Info("config reloaded successfully")
+			reloadConfig("SIGHUP")
 			continue
 		}
 
