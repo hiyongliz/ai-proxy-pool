@@ -1,0 +1,47 @@
+server:
+  listen_addr: ":8080"
+  read_timeout: 30s
+  write_timeout: 300s
+  idle_timeout: 60s
+  upstream_timeout: 300s
+  auth:
+    enabled: true
+    header: "Authorization"
+    scheme: "Bearer"
+    token: "${PROXY_AUTH_TOKEN}"
+
+router:
+  strategy: "round_robin" # round_robin | weighted_random
+  default_provider: "claude-backup"
+  header_provider_key: "X-AI-Provider"
+  route_rules:
+    - path_prefix: "/v1/messages"
+      model_prefix: "claude-opus"
+      providers: ["claude-primary"]
+    - path_prefix: "/v1/messages"
+      providers: ["claude-backup"]
+
+providers:
+  - name: "claude-primary"
+    base_url: "https://api.anthropic.com"
+    path_prefix: "" # 如果你的上游网关是 /anthropic/v1，可配置为该前缀
+    enabled: true
+    weight: 5
+    timeout: 300s
+    api_key: "${ANTHROPIC_API_KEY_PRIMARY}"
+    auth_type: "auth_token" # auth_token | bearer | x-api-key | none
+    auth_header: "Authorization"
+    static_headers:
+      anthropic-version: "2023-06-01"
+    model_prefixes: ["claude-4", "claude-3"]
+
+  - name: "claude-backup"
+    base_url: "https://your-claude-compatible-provider.example.com"
+    enabled: true
+    weight: 2
+    timeout: 300s
+    api_key: "${ANTHROPIC_API_KEY_BACKUP}"
+    auth_type: "auth_token"
+    auth_header: "Authorization"
+    static_headers:
+      anthropic-version: "2023-06-01"
