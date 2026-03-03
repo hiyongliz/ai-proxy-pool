@@ -66,6 +66,7 @@ type ProviderConfig struct {
 	StaticHeaders map[string]string `yaml:"static_headers"`
 	ModelPrefixes []string          `yaml:"model_prefixes"`
 	ModelRegex    string            `yaml:"model_regex"`
+	ModelMapping  map[string]string `yaml:"model_mapping"`
 }
 
 // Load reads and validates YAML config from disk.

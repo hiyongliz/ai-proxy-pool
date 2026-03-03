@@ -214,3 +214,67 @@ func TestProviderAuthTokenToUpstream(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestModelMapping(t *testing.T) {
+	var receivedModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		receivedModel = extractModel(body, r.Header.Get("Content-Type"))
+		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+		},
+		Router: config.RouterConfig{
+			Strategy:        "round_robin",
+			DefaultProvider: "backup",
+		},
+		Providers: []config.ProviderConfig{
+			{
+				Name:    "backup",
+				BaseURL: upstream.URL,
+				ModelMapping: map[string]string{
+					"claude-opus-4-6":  "claude-opus-4-5",
+					"claude-sonnet-4-6": "claude-sonnet-4-5",
+				},
+			},
+		},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	handler := server.Handler()
+
+	t.Run("mapped model is rewritten", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude-opus-4-6"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		if receivedModel != "claude-opus-4-5" {
+			t.Fatalf("expected upstream model %q, got %q", "claude-opus-4-5", receivedModel)
+		}
+	})
+
+	t.Run("unmapped model is unchanged", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude-haiku-4-5"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		if receivedModel != "claude-haiku-4-5" {
+			t.Fatalf("expected upstream model %q, got %q", "claude-haiku-4-5", receivedModel)
+		}
+	})
+}

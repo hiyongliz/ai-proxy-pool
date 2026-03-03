@@ -45,3 +45,6 @@ providers:
     auth_header: "Authorization"
     static_headers:
       anthropic-version: "2023-06-01"
+    model_mapping:
+      claude-opus-4-6: "claude-opus-4-5"   # 请求 claude-opus-4-6 时，上游实际使用 claude-opus-4-5
+      claude-sonnet-4-6: "claude-sonnet-4-5"

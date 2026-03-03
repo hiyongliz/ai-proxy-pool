@@ -107,6 +107,16 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 模型映射：将请求中的 model 替换为上游 provider 实际使用的 model
+	upstreamModel := model
+	if model != "" && len(selected.ModelMapping) > 0 {
+		if mapped, ok := selected.ModelMapping[model]; ok {
+			upstreamModel = mapped
+			body = replaceModel(body, model, mapped)
+			slog.Info("model mapped", "provider", selected.Name, "from", model, "to", mapped)
+		}
+	}
+
 	upstreamReq, err := s.buildUpstreamRequest(r, body, selected)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -125,7 +135,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		"method", upstreamReq.Method,
 		"upstream_host", upstreamReq.URL.Host,
 		"upstream_path", upstreamReq.URL.Path,
-		"model", model,
+		"model", upstreamModel,
 	)
 
 	resp, err := client.Do(upstreamReq)
@@ -330,6 +340,19 @@ func extractModel(body []byte, contentType string) string {
 		return ""
 	}
 	return modelString
+}
+
+func replaceModel(body []byte, from, to string) []byte {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	payload["model"] = to
+	replaced, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return replaced
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload map[string]string) {
