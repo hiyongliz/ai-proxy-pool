@@ -14,6 +14,10 @@ coverage.txt
 # Config with secrets
 config.yaml
 
+# Runtime
+*.pid
+*.log
+
 # IDE
 .idea/
 .vscode/

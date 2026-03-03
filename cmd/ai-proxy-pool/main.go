@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -15,30 +18,133 @@ import (
 	"github.com/hiyongliz/ai-proxy-pool/internal/proxy"
 )
 
-func resolveConfigPath() string {
-	cfgPath := flag.String("config", "", "path to config file")
-	flag.Parse()
+var (
+	flagConfig string
+	flagDaemon bool
+	flagLog    string
+)
 
-	if *cfgPath != "" {
-		return *cfgPath
+func init() {
+	flag.StringVar(&flagConfig, "config", "", "path to config file")
+	flag.BoolVar(&flagDaemon, "d", false, "run as daemon")
+	flag.StringVar(&flagLog, "log", "", "log file path (default: ~/.ai_proxy_pool/ai-proxy-pool.log)")
+}
+
+func defaultDir() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".ai_proxy_pool")
 	}
+	return "."
+}
 
-	// 未指定时，依次尝试当前目录和 home 目录
+func resolveConfigPath() string {
+	if flagConfig != "" {
+		return flagConfig
+	}
 	if _, err := os.Stat("config.yaml"); err == nil {
 		return "config.yaml"
 	}
+	return filepath.Join(defaultDir(), "config.yaml")
+}
 
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".ai_proxy_pool", "config.yaml")
+func resolveLogPath() string {
+	if flagLog != "" {
+		return flagLog
+	}
+	return filepath.Join(defaultDir(), "ai-proxy-pool.log")
+}
+
+func pidPath() string {
+	return filepath.Join(defaultDir(), "ai-proxy-pool.pid")
+}
+
+func setupLogger(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("create log dir: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open log file: %w", err)
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(f, nil)))
+	return f, nil
+}
+
+func writePID(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o644)
+}
+
+func daemonize() {
+	args := make([]string, 0, len(os.Args))
+	for _, arg := range os.Args[1:] {
+		if arg == "-d" {
+			continue
+		}
+		args = append(args, arg)
 	}
 
-	return "config.yaml"
+	// 传递解析后的路径，确保子进程使用相同配置
+	hasConfig := false
+	hasLog := false
+	for _, arg := range args {
+		if arg == "-config" {
+			hasConfig = true
+		}
+		if arg == "-log" {
+			hasLog = true
+		}
+	}
+	if !hasConfig {
+		args = append(args, "-config", resolveConfigPath())
+	}
+	if !hasLog {
+		args = append(args, "-log", resolveLogPath())
+	}
+
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), "_AI_PROXY_POOL_DAEMON=1")
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	if err := cmd.Start(); err != nil {
+		slog.Error("failed to start daemon", "error", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "daemon started, pid=%d, log=%s\n", cmd.Process.Pid, resolveLogPath())
+	os.Exit(0)
 }
 
 func main() {
-	cfgPath := resolveConfigPath()
+	flag.Parse()
 
+	// 父进程：fork 子进程后退出
+	if flagDaemon && os.Getenv("_AI_PROXY_POOL_DAEMON") != "1" {
+		daemonize()
+	}
+
+	logPath := resolveLogPath()
+	logFile, err := setupLogger(logPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "setup logger failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer logFile.Close()
+
+	cfgPath := resolveConfigPath()
 	slog.Info("using config", "path", cfgPath)
+	slog.Info("logging to", "path", logPath)
+
+	if err := writePID(pidPath()); err != nil {
+		slog.Error("write pid file failed", "error", err)
+	}
+	defer os.Remove(pidPath())
+
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		slog.Error("load config failed", "path", cfgPath, "error", err)
