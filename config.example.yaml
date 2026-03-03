@@ -4,6 +4,10 @@ server:
   write_timeout: 300s
   idle_timeout: 60s
   upstream_timeout: 300s
+  retry:
+    max_attempts: 3        # 最大尝试次数（含首次），默认 3
+    retry_on_5xx: true     # 5xx 响应时重试，默认 true
+    retry_on_network: true # 网络错误时重试，默认 true
   auth:
     enabled: true
     header: "Authorization"

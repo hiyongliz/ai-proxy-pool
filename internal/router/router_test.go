@@ -113,3 +113,54 @@ func TestSelectorSelect(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectorExcludedProviders(t *testing.T) {
+	t.Parallel()
+
+	providers := []config.ProviderConfig{
+		{Name: "p1", BaseURL: "https://p1.example.com", Enabled: boolPtr(true), Weight: 1},
+		{Name: "p2", BaseURL: "https://p2.example.com", Enabled: boolPtr(true), Weight: 1},
+		{Name: "p3", BaseURL: "https://p3.example.com", Enabled: boolPtr(true), Weight: 1},
+	}
+
+	selector, err := NewSelector(config.RouterConfig{
+		Strategy:        "round_robin",
+		DefaultProvider: "p1",
+	}, providers)
+	if err != nil {
+		t.Fatalf("new selector: %v", err)
+	}
+
+	t.Run("exclude default provider falls back to others", func(t *testing.T) {
+		got, err := selector.Select(SelectionInput{
+			ExcludedProviders: []string{"p1"},
+		})
+		if err != nil {
+			t.Fatalf("select: %v", err)
+		}
+		if got.Name == "p1" {
+			t.Fatalf("expected non-p1 provider, got %q", got.Name)
+		}
+	})
+
+	t.Run("exclude multiple providers", func(t *testing.T) {
+		got, err := selector.Select(SelectionInput{
+			ExcludedProviders: []string{"p1", "p2"},
+		})
+		if err != nil {
+			t.Fatalf("select: %v", err)
+		}
+		if got.Name != "p3" {
+			t.Fatalf("expected p3, got %q", got.Name)
+		}
+	})
+
+	t.Run("exclude all providers returns error", func(t *testing.T) {
+		_, err := selector.Select(SelectionInput{
+			ExcludedProviders: []string{"p1", "p2", "p3"},
+		})
+		if err == nil {
+			t.Fatalf("expected error when all providers excluded")
+		}
+	})
+}

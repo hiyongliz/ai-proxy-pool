@@ -5,16 +5,21 @@ import (
 	"bytes"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
+	"github.com/hiyongliz/ai-proxy-pool/internal/metrics"
 	"github.com/hiyongliz/ai-proxy-pool/internal/router"
 )
 
@@ -68,10 +73,11 @@ func NewServer(cfg config.Config) (*Server, error) {
 	}, nil
 }
 
-// Handler returns the HTTP handler with health and proxy endpoints.
+// Handler returns the HTTP handler with health, metrics, and proxy endpoints.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/", s.handleProxy)
 	return s.loggingMiddleware(mux)
 }
@@ -97,36 +103,110 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	model := extractModel(body, r.Header.Get("Content-Type"))
 	forcedProvider := r.Header.Get(s.cfg.Router.HeaderProviderKey)
-	selected, err := s.selector.Select(router.SelectionInput{
-		Path:           r.URL.Path,
-		Model:          model,
-		ForcedProvider: forcedProvider,
-	})
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
+
+	retryCfg := s.cfg.Server.Retry
+	maxAttempts := retryCfg.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
 	}
 
-	// 模型映射：将请求中的 model 替换为上游 provider 实际使用的 model
+	// 强制指定 provider 时不重试
+	if forcedProvider != "" {
+		maxAttempts = 1
+	}
+
+	var excludedProviders []string
+	var lastErr error
+	var lastStatusCode int
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		selected, err := s.selector.Select(router.SelectionInput{
+			Path:              r.URL.Path,
+			Model:             model,
+			ForcedProvider:    forcedProvider,
+			ExcludedProviders: excludedProviders,
+		})
+		if err != nil {
+			if lastErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{
+					"error": fmt.Sprintf("all providers exhausted, last error: %v", lastErr),
+				})
+				return
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+
+		statusCode, upstreamErr := s.doUpstreamRequest(w, r, body, model, selected, attempt, maxAttempts)
+		if upstreamErr == nil {
+			return // 成功，直接返回
+		}
+
+		lastErr = upstreamErr
+		lastStatusCode = statusCode
+		excludedProviders = append(excludedProviders, selected.Name)
+
+		// 判断是否需要重试
+		shouldRetry := false
+		if isNetworkError(upstreamErr) && retryCfg.RetryOnNetworkOrDefault() {
+			shouldRetry = true
+			metrics.ProviderRetriesTotal.WithLabelValues(selected.Name, "network_error").Inc()
+			slog.Warn("retrying due to network error",
+				"provider", selected.Name,
+				"attempt", attempt,
+				"max_attempts", maxAttempts,
+				"error", upstreamErr,
+			)
+		} else if statusCode >= 500 && retryCfg.RetryOn5xxOrDefault() {
+			shouldRetry = true
+			metrics.ProviderRetriesTotal.WithLabelValues(selected.Name, "5xx").Inc()
+			slog.Warn("retrying due to 5xx response",
+				"provider", selected.Name,
+				"attempt", attempt,
+				"max_attempts", maxAttempts,
+				"status", statusCode,
+			)
+		}
+
+		if !shouldRetry || attempt >= maxAttempts {
+			break
+		}
+	}
+
+	// 所有重试均失败
+	if lastStatusCode >= 500 {
+		writeJSON(w, lastStatusCode, map[string]string{
+			"error": fmt.Sprintf("upstream returned %d after %d attempts", lastStatusCode, maxAttempts),
+		})
+		return
+	}
+	writeJSON(w, http.StatusBadGateway, map[string]string{
+		"error": fmt.Sprintf("upstream request failed after %d attempts: %v", maxAttempts, lastErr),
+	})
+}
+
+// doUpstreamRequest 执行上游请求，返回 (HTTP状态码, 错误)。
+// 如果成功写入响应，错误为 nil；否则返回错误供重试决策。
+func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body []byte, model string, selected config.ProviderConfig, attempt, maxAttempts int) (int, error) {
+	// 模型映射
 	upstreamModel := model
+	upstreamBody := body
 	if model != "" && len(selected.ModelMapping) > 0 {
 		if mapped, ok := selected.ModelMapping[model]; ok {
 			upstreamModel = mapped
-			body = replaceModel(body, mapped)
+			upstreamBody = replaceModel(body, mapped)
 			slog.Info("model mapped", "provider", selected.Name, "from", model, "to", mapped)
 		}
 	}
 
-	upstreamReq, err := s.buildUpstreamRequest(r, body, selected)
+	upstreamReq, err := s.buildUpstreamRequest(r, upstreamBody, selected)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
+		return 0, fmt.Errorf("build upstream request: %w", err)
 	}
 
 	client, ok := s.clients[selected.Name]
 	if !ok {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "selected provider client missing"})
-		return
+		return 0, fmt.Errorf("selected provider %q client missing", selected.Name)
 	}
 
 	upstreamStart := time.Now()
@@ -136,6 +216,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		"upstream_host", upstreamReq.URL.Host,
 		"upstream_path", upstreamReq.URL.Path,
 		"model", upstreamModel,
+		"attempt", attempt,
+		"max_attempts", maxAttempts,
 	)
 
 	resp, err := client.Do(upstreamReq)
@@ -146,12 +228,25 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"upstream_host", upstreamReq.URL.Host,
 			"upstream_path", upstreamReq.URL.Path,
 			"duration_ms", time.Since(upstreamStart).Milliseconds(),
+			"attempt", attempt,
 			"error", err,
 		)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("upstream request failed: %v", err)})
-		return
+		metrics.ProviderRequestsTotal.WithLabelValues(selected.Name, "error", upstreamModel).Inc()
+		metrics.ProviderRequestDuration.WithLabelValues(selected.Name, upstreamModel).Observe(time.Since(upstreamStart).Seconds())
+		return 0, err
 	}
 	defer resp.Body.Close()
+
+	statusStr := strconv.Itoa(resp.StatusCode)
+	metrics.ProviderRequestsTotal.WithLabelValues(selected.Name, statusStr, upstreamModel).Inc()
+	metrics.ProviderRequestDuration.WithLabelValues(selected.Name, upstreamModel).Observe(time.Since(upstreamStart).Seconds())
+
+	// 如果是 5xx 且需要重试，不写响应直接返回错误
+	if resp.StatusCode >= 500 && attempt < maxAttempts && s.cfg.Server.Retry.RetryOn5xxOrDefault() {
+		// 读取并丢弃响应体以允许连接复用
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode, fmt.Errorf("upstream returned %d", resp.StatusCode)
+	}
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.Header().Set("X-Selected-Provider", selected.Name)
@@ -163,7 +258,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			"status", resp.StatusCode,
 			"error", err,
 		)
-		return
+		// 响应已部分写入，无法重试
+		return resp.StatusCode, nil
 	}
 
 	slog.Info("upstream response",
@@ -171,7 +267,27 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		"status", resp.StatusCode,
 		"duration_ms", time.Since(upstreamStart).Milliseconds(),
 		"response_bytes", written,
+		"attempt", attempt,
 	)
+
+	return resp.StatusCode, nil
+}
+
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 检查常见网络错误类型
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	// URL 错误通常包装了底层网络错误
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
+	}
+	return false
 }
 
 func (s *Server) buildUpstreamRequest(inReq *http.Request, body []byte, provider config.ProviderConfig) (*http.Request, error) {
@@ -414,13 +530,19 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		recorder := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(recorder, r)
 
+		duration := time.Since(start)
+		statusStr := strconv.Itoa(recorder.StatusCode())
+
+		metrics.HTTPRequestsTotal.WithLabelValues(r.Method, r.URL.Path, statusStr).Inc()
+		metrics.HTTPRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration.Seconds())
+
 		slog.Info("http request",
 			"phase", "finish",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"request_id", requestID,
 			"status", recorder.StatusCode(),
-			"duration_ms", time.Since(start).Milliseconds(),
+			"duration_ms", duration.Milliseconds(),
 			"response_bytes", recorder.bytesWritten,
 			"selected_provider", recorder.Header().Get("X-Selected-Provider"),
 		)

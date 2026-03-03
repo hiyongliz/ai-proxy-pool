@@ -15,9 +15,10 @@ import (
 
 // SelectionInput describes the attributes used to select an upstream provider.
 type SelectionInput struct {
-	Path           string
-	Model          string
-	ForcedProvider string
+	Path              string
+	Model             string
+	ForcedProvider    string
+	ExcludedProviders []string
 }
 
 // Selector picks provider targets according to route rules and fallback policy.
@@ -102,6 +103,8 @@ func NewSelector(routerCfg config.RouterConfig, providers []config.ProviderConfi
 
 // Select returns a provider for the request.
 func (s *Selector) Select(input SelectionInput) (config.ProviderConfig, error) {
+	excluded := toSet(input.ExcludedProviders)
+
 	if input.ForcedProvider != "" {
 		if item, ok := s.providers[input.ForcedProvider]; ok {
 			return item.cfg, nil
@@ -111,24 +114,52 @@ func (s *Selector) Select(input SelectionInput) (config.ProviderConfig, error) {
 
 	for _, rule := range s.rules {
 		if ruleMatches(rule, input.Path, input.Model) {
-			return s.pick(rule.providers)
+			candidates := filterExcluded(rule.providers, excluded)
+			if len(candidates) > 0 {
+				return s.pick(candidates)
+			}
 		}
 	}
 
 	if input.Model != "" {
 		modelCandidates := s.matchProvidersByModel(input.Model)
-		if len(modelCandidates) > 0 {
-			return s.pick(modelCandidates)
+		candidates := filterExcluded(modelCandidates, excluded)
+		if len(candidates) > 0 {
+			return s.pick(candidates)
 		}
 	}
 
 	if s.defaultProvider != "" {
-		if item, ok := s.providers[s.defaultProvider]; ok {
-			return item.cfg, nil
+		if _, isExcluded := excluded[s.defaultProvider]; !isExcluded {
+			if item, ok := s.providers[s.defaultProvider]; ok {
+				return item.cfg, nil
+			}
 		}
 	}
 
-	return s.pick(s.allProviderNames)
+	candidates := filterExcluded(s.allProviderNames, excluded)
+	return s.pick(candidates)
+}
+
+func toSet(names []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		m[n] = struct{}{}
+	}
+	return m
+}
+
+func filterExcluded(names []string, excluded map[string]struct{}) []string {
+	if len(excluded) == 0 {
+		return names
+	}
+	filtered := make([]string, 0, len(names))
+	for _, n := range names {
+		if _, skip := excluded[n]; !skip {
+			filtered = append(filtered, n)
+		}
+	}
+	return filtered
 }
 
 func (s *Selector) matchProvidersByModel(model string) []string {

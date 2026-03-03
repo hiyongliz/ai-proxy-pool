@@ -26,6 +26,30 @@ type ServerConfig struct {
 	IdleTimeout     time.Duration `yaml:"idle_timeout"`
 	UpstreamTimeout time.Duration `yaml:"upstream_timeout"`
 	Auth            AuthConfig    `yaml:"auth"`
+	Retry           RetryConfig   `yaml:"retry"`
+}
+
+// RetryConfig controls upstream request retry behavior.
+type RetryConfig struct {
+	MaxAttempts    int   `yaml:"max_attempts"`
+	RetryOn5xx     *bool `yaml:"retry_on_5xx"`
+	RetryOnNetwork *bool `yaml:"retry_on_network"`
+}
+
+// RetryOn5xxOrDefault returns true when retry_on_5xx is enabled or omitted.
+func (r RetryConfig) RetryOn5xxOrDefault() bool {
+	if r.RetryOn5xx == nil {
+		return true
+	}
+	return *r.RetryOn5xx
+}
+
+// RetryOnNetworkOrDefault returns true when retry_on_network is enabled or omitted.
+func (r RetryConfig) RetryOnNetworkOrDefault() bool {
+	if r.RetryOnNetwork == nil {
+		return true
+	}
+	return *r.RetryOnNetwork
 }
 
 // AuthConfig controls client authentication for requests entering the proxy.
@@ -111,6 +135,10 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Server.Auth.Scheme == "" {
 		cfg.Server.Auth.Scheme = "Bearer"
+	}
+
+	if cfg.Server.Retry.MaxAttempts <= 0 {
+		cfg.Server.Retry.MaxAttempts = 3
 	}
 
 	if cfg.Router.Strategy == "" {
