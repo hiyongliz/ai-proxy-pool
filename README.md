@@ -88,6 +88,8 @@ curl -sS http://127.0.0.1:8080/v1/messages \
 | `-config` | 配置文件路径 | `~/.ai_proxy_pool/config.yaml` |
 | `-d` | 后台守护进程运行 | `false` |
 | `-stop` | 停止后台守护进程 | `false` |
+| `-restart` | 重启后台守护进程 | `false` |
+| `-logs` | 查看并持续跟随日志输出 | `false` |
 | `-log` | 日志文件路径 | `~/.ai_proxy_pool/ai-proxy-pool.log` |
 
 **配置文件默认路径**：`~/.ai_proxy_pool/config.yaml`（可通过 `-config` 覆盖）
@@ -103,11 +105,16 @@ curl -sS http://127.0.0.1:8080/v1/messages \
 | `write_timeout` | 写超时 | `300s` |
 | `idle_timeout` | 空闲超时 | `60s` |
 | `upstream_timeout` | 上游请求超时 | `300s` |
+| `max_request_body_bytes` | 单请求体大小上限 | `8388608` (8 MiB) |
 | `auth.enabled` | 启用代理入口认证 | `false` |
 | `auth.token` | 认证 Token（支持 `${ENV}`） | - |
 | `retry.max_attempts` | 最大重试次数（含首次） | `3` |
 | `retry.retry_on_5xx` | 5xx 响应时重试 | `true` |
 | `retry.retry_on_network` | 网络错误时重试 | `true` |
+
+说明：当 `auth.enabled=true` 时，入口会兼容两种认证头：
+- `Authorization: Bearer <token>`
+- `X-Api-Key: <token>`
 
 ### Router
 
@@ -168,6 +175,12 @@ make install  # 安装到 $GOPATH/bin
 ai-proxy-pool -stop
 ```
 
+### 重启后台进程
+
+```bash
+ai-proxy-pool -restart
+```
+
 ### 热重载配置
 
 配置文件修改后会自动重载，也可手动触发：
@@ -179,7 +192,7 @@ kill -HUP $(cat ~/.ai_proxy_pool/ai-proxy-pool.pid)
 ### 查看日志
 
 ```bash
-tail -f ~/.ai_proxy_pool/ai-proxy-pool.log
+ai-proxy-pool -logs
 ```
 
 ## License

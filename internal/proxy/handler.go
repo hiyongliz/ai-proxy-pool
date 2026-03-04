@@ -2,8 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"bytes"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -23,27 +20,20 @@ import (
 	"github.com/hiyongliz/ai-proxy-pool/internal/router"
 )
 
-var hopByHopHeaders = map[string]struct{}{
-	"Connection":          {},
-	"Proxy-Connection":    {},
-	"Keep-Alive":          {},
-	"Proxy-Authenticate":  {},
-	"Proxy-Authorization": {},
-	"Te":                  {},
-	"Trailer":             {},
-	"Transfer-Encoding":   {},
-	"Upgrade":             {},
-}
-
 // Server is an HTTP proxy that routes requests to configured providers.
 type Server struct {
 	cfg      config.Config
 	selector *router.Selector
 	clients  map[string]*http.Client
+	handler  http.Handler
 }
 
 // NewServer creates a proxy server from configuration.
 func NewServer(cfg config.Config) (*Server, error) {
+	if cfg.Server.MaxRequestBodyBytes <= 0 {
+		cfg.Server.MaxRequestBodyBytes = 8 * 1024 * 1024
+	}
+
 	selector, err := router.NewSelector(cfg.Router, cfg.Providers)
 	if err != nil {
 		return nil, fmt.Errorf("new selector: %w", err)
@@ -66,15 +56,21 @@ func NewServer(cfg config.Config) (*Server, error) {
 		}
 	}
 
-	return &Server{
+	server := &Server{
 		cfg:      cfg,
 		selector: selector,
 		clients:  clients,
-	}, nil
+	}
+	server.handler = server.buildHandler()
+	return server, nil
 }
 
 // Handler returns the HTTP handler with health, metrics, and proxy endpoints.
 func (s *Server) Handler() http.Handler {
+	return s.handler
+}
+
+func (s *Server) buildHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.Handle("/metrics", promhttp.Handler())
@@ -95,8 +91,15 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readRequestBodyWithLimit(w, r, s.cfg.Server.MaxRequestBodyBytes)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+				"error": fmt.Sprintf("request body exceeds limit (%d bytes)", s.cfg.Server.MaxRequestBodyBytes),
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
 		return
 	}
@@ -190,10 +193,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body []byte, model string, selected config.ProviderConfig, attempt, maxAttempts int) (int, error) {
 	// 模型映射
 	upstreamModel := model
+	modelLabel := modelMetricLabel(model)
 	upstreamBody := body
 	if model != "" && len(selected.ModelMapping) > 0 {
 		if mapped, ok := selected.ModelMapping[model]; ok {
 			upstreamModel = mapped
+			modelLabel = modelMetricLabel(mapped)
 			upstreamBody = replaceModel(body, mapped)
 			slog.Info("model mapped", "provider", selected.Name, "from", model, "to", mapped)
 		}
@@ -231,15 +236,15 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 			"attempt", attempt,
 			"error", err,
 		)
-		metrics.ProviderRequestsTotal.WithLabelValues(selected.Name, "error", upstreamModel).Inc()
-		metrics.ProviderRequestDuration.WithLabelValues(selected.Name, upstreamModel).Observe(time.Since(upstreamStart).Seconds())
+		metrics.ProviderRequestsTotal.WithLabelValues(selected.Name, "error", modelLabel).Inc()
+		metrics.ProviderRequestDuration.WithLabelValues(selected.Name, modelLabel).Observe(time.Since(upstreamStart).Seconds())
 		return 0, err
 	}
 	defer resp.Body.Close()
 
 	statusStr := strconv.Itoa(resp.StatusCode)
-	metrics.ProviderRequestsTotal.WithLabelValues(selected.Name, statusStr, upstreamModel).Inc()
-	metrics.ProviderRequestDuration.WithLabelValues(selected.Name, upstreamModel).Observe(time.Since(upstreamStart).Seconds())
+	metrics.ProviderRequestsTotal.WithLabelValues(selected.Name, statusStr, modelLabel).Inc()
+	metrics.ProviderRequestDuration.WithLabelValues(selected.Name, modelLabel).Observe(time.Since(upstreamStart).Seconds())
 
 	// 如果是 5xx 且需要重试，不写响应直接返回错误
 	if resp.StatusCode >= 500 && attempt < maxAttempts && s.cfg.Server.Retry.RetryOn5xxOrDefault() {
@@ -273,202 +278,10 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 	return resp.StatusCode, nil
 }
 
-func isNetworkError(err error) bool {
-	if err == nil {
-		return false
-	}
-	// 检查常见网络错误类型
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-	// URL 错误通常包装了底层网络错误
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		return true
-	}
-	return false
-}
-
-func (s *Server) buildUpstreamRequest(inReq *http.Request, body []byte, provider config.ProviderConfig) (*http.Request, error) {
-	targetURL, err := buildUpstreamURL(provider, inReq.URL.Path, inReq.URL.RawQuery)
-	if err != nil {
-		return nil, fmt.Errorf("build upstream url: %w", err)
-	}
-
-	outReq, err := http.NewRequestWithContext(inReq.Context(), inReq.Method, targetURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("new upstream request: %w", err)
-	}
-
-	copyRequestHeaders(outReq.Header, inReq.Header)
-	outReq.Host = mustHost(provider.BaseURL)
-	addForwardHeaders(outReq, inReq)
-	applyProviderAuth(outReq, provider)
-	applyProviderStaticHeaders(outReq, provider)
-	outReq.Header.Del(s.cfg.Router.HeaderProviderKey)
-
-	return outReq, nil
-}
-
-func buildUpstreamURL(provider config.ProviderConfig, inPath, rawQuery string) (string, error) {
-	base, err := url.Parse(provider.BaseURL)
-	if err != nil {
-		return "", fmt.Errorf("parse base url: %w", err)
-	}
-
-	pathPrefix := provider.PathPrefix
-	if pathPrefix != "" && strings.HasPrefix(inPath, pathPrefix) {
-		pathPrefix = ""
-	}
-
-	base.Path = joinURLPath(base.Path, pathPrefix, inPath)
-	base.RawQuery = rawQuery
-	return base.String(), nil
-}
-
-func mustHost(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return ""
-	}
-	return parsed.Host
-}
-
-func joinURLPath(parts ...string) string {
-	out := ""
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		trimmed := strings.Trim(part, "/")
-		if trimmed == "" {
-			continue
-		}
-		if out == "" {
-			out = "/" + trimmed
-			continue
-		}
-		out = strings.TrimRight(out, "/") + "/" + trimmed
-	}
-	if out == "" {
-		return "/"
-	}
-	return out
-}
-
-func addForwardHeaders(outReq, inReq *http.Request) {
-	outReq.Header.Set("X-Forwarded-Proto", "http")
-	if inReq.TLS != nil {
-		outReq.Header.Set("X-Forwarded-Proto", "https")
-	}
-
-	host := inReq.Host
-	if host == "" {
-		host = inReq.URL.Host
-	}
-	if host != "" {
-		outReq.Header.Set("X-Forwarded-Host", host)
-	}
-
-	if ip, _, err := net.SplitHostPort(inReq.RemoteAddr); err == nil {
-		if prior := outReq.Header.Get("X-Forwarded-For"); prior != "" {
-			outReq.Header.Set("X-Forwarded-For", prior+", "+ip)
-		} else {
-			outReq.Header.Set("X-Forwarded-For", ip)
-		}
-	}
-}
-
-func applyProviderAuth(outReq *http.Request, provider config.ProviderConfig) {
-	if provider.APIKey == "" {
-		return
-	}
-
-	switch strings.ToLower(provider.AuthType) {
-	case "", "x-api-key":
-		headerName := provider.AuthHeader
-		if headerName == "" {
-			headerName = "x-api-key"
-		}
-		outReq.Header.Set(headerName, provider.APIKey)
-	case "bearer", "auth_token", "auth-token":
-		outReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
-	case "none":
-		return
-	default:
-		headerName := provider.AuthHeader
-		if headerName == "" {
-			headerName = "Authorization"
-		}
-		outReq.Header.Set(headerName, provider.APIKey)
-	}
-}
-
-func applyProviderStaticHeaders(outReq *http.Request, provider config.ProviderConfig) {
-	for k, v := range provider.StaticHeaders {
-		outReq.Header.Set(k, v)
-	}
-}
-
-func copyRequestHeaders(dst, src http.Header) {
-	for key, values := range src {
-		if _, skip := hopByHopHeaders[key]; skip {
-			continue
-		}
-		for _, value := range values {
-			dst.Add(key, value)
-		}
-	}
-}
-
-func copyResponseHeaders(dst, src http.Header) {
-	for key, values := range src {
-		if _, skip := hopByHopHeaders[key]; skip {
-			continue
-		}
-		dst.Del(key)
-		for _, value := range values {
-			dst.Add(key, value)
-		}
-	}
-}
-
-func extractModel(body []byte, contentType string) string {
-	if len(body) == 0 {
-		return ""
-	}
-	if contentType != "" && !strings.Contains(strings.ToLower(contentType), "application/json") {
-		return ""
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
-	}
-
-	modelValue, ok := payload["model"]
-	if !ok {
-		return ""
-	}
-	modelString, ok := modelValue.(string)
-	if !ok {
-		return ""
-	}
-	return modelString
-}
-
-func replaceModel(body []byte, to string) []byte {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return body
-	}
-	payload["model"] = to
-	replaced, err := json.Marshal(payload)
-	if err != nil {
-		return body
-	}
-	return replaced
+func readRequestBodyWithLimit(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, error) {
+	limitedBody := http.MaxBytesReader(w, r.Body, maxBytes)
+	defer limitedBody.Close()
+	return io.ReadAll(limitedBody)
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, payload map[string]string) {
@@ -477,38 +290,6 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload map[string]string)
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
 	_ = encoder.Encode(payload)
-}
-
-func (s *Server) isAuthorized(r *http.Request) bool {
-	authCfg := s.cfg.Server.Auth
-	if !authCfg.Enabled {
-		return true
-	}
-
-	headerValue := strings.TrimSpace(r.Header.Get(authCfg.Header))
-	token := strings.TrimSpace(authCfg.Token)
-	if token == "" || headerValue == "" {
-		return false
-	}
-
-	scheme := strings.TrimSpace(authCfg.Scheme)
-	if scheme == "" {
-		return secureEqual(headerValue, token)
-	}
-
-	parts := strings.SplitN(headerValue, " ", 2)
-	if len(parts) != 2 {
-		return false
-	}
-	if !strings.EqualFold(strings.TrimSpace(parts[0]), scheme) {
-		return false
-	}
-
-	return secureEqual(strings.TrimSpace(parts[1]), token)
-}
-
-func secureEqual(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
@@ -532,9 +313,10 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 
 		duration := time.Since(start)
 		statusStr := strconv.Itoa(recorder.StatusCode())
+		pathLabel := pathMetricLabel(r.URL.Path)
 
-		metrics.HTTPRequestsTotal.WithLabelValues(r.Method, r.URL.Path, statusStr).Inc()
-		metrics.HTTPRequestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration.Seconds())
+		metrics.HTTPRequestsTotal.WithLabelValues(r.Method, pathLabel, statusStr).Inc()
+		metrics.HTTPRequestDuration.WithLabelValues(r.Method, pathLabel).Observe(duration.Seconds())
 
 		slog.Info("http request",
 			"phase", "finish",
@@ -549,6 +331,18 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func pathMetricLabel(path string) string {
+	switch path {
+	case "/healthz":
+		return "/healthz"
+	case "/metrics":
+		return "/metrics"
+	default:
+		return "/proxy"
+	}
+}
+
+// statusRecorder wraps http.ResponseWriter to capture status code and bytes written.
 type statusRecorder struct {
 	http.ResponseWriter
 	statusCode   int

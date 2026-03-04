@@ -4,6 +4,7 @@ server:
   write_timeout: 300s
   idle_timeout: 60s
   upstream_timeout: 300s
+  max_request_body_bytes: 8388608 # 8 MiB
   retry:
     max_attempts: 3        # 最大尝试次数（含首次），默认 3
     retry_on_5xx: true     # 5xx 响应时重试，默认 true

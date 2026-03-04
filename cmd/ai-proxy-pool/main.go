@@ -8,31 +8,32 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
-	"github.com/hiyongliz/ai-proxy-pool/internal/metrics"
 	"github.com/hiyongliz/ai-proxy-pool/internal/proxy"
 )
 
 var (
-	flagConfig string
-	flagDaemon bool
-	flagStop   bool
-	flagLog    string
+	flagConfig  string
+	flagDaemon  bool
+	flagStop    bool
+	flagRestart bool
+	flagLogs    bool
+	flagLog     string
 )
 
 func init() {
 	flag.StringVar(&flagConfig, "config", "", "path to config file")
 	flag.BoolVar(&flagDaemon, "d", false, "run as daemon")
 	flag.BoolVar(&flagStop, "stop", false, "stop the running daemon")
+	flag.BoolVar(&flagRestart, "restart", false, "restart the running daemon")
+	flag.BoolVar(&flagLogs, "logs", false, "show and follow log output")
 	flag.StringVar(&flagLog, "log", "", "log file path (default: ~/.ai_proxy_pool/ai-proxy-pool.log)")
 }
 
@@ -79,99 +80,19 @@ func setupLogger(path string, daemon bool) (*os.File, error) {
 	return f, nil
 }
 
-func writePID(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o644)
-}
-
-func daemonize() {
-	args := make([]string, 0, len(os.Args))
-	for _, arg := range os.Args[1:] {
-		if arg == "-d" {
-			continue
-		}
-		args = append(args, arg)
-	}
-
-	// 传递解析后的路径，确保子进程使用相同配置
-	hasConfig := false
-	hasLog := false
-	for _, arg := range args {
-		if arg == "-config" {
-			hasConfig = true
-		}
-		if arg == "-log" {
-			hasLog = true
-		}
-	}
-	if !hasConfig {
-		args = append(args, "-config", resolveConfigPath())
-	}
-	if !hasLog {
-		args = append(args, "-log", resolveLogPath())
-	}
-
-	cmd := exec.Command(os.Args[0], args...)
-	cmd.Env = append(os.Environ(), "_AI_PROXY_POOL_DAEMON=1")
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	if err := cmd.Start(); err != nil {
-		slog.Error("failed to start daemon", "error", err)
-		os.Exit(1)
-	}
-
-	fmt.Fprintf(os.Stderr, "daemon started, pid=%d, log=%s\n", cmd.Process.Pid, resolveLogPath())
-	os.Exit(0)
-}
-
-func stopDaemon() {
-	pidFile := pidPath()
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to read pid file: %v\n", err)
-		os.Exit(1)
-	}
-
-	pid, err := strconv.Atoi(string(data))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid pid: %v\n", err)
-		os.Exit(1)
-	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to find process: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := process.Signal(syscall.SIGTERM); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to send signal: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 等待进程退出
-	for i := 0; i < 50; i++ { // 最多等待 5 秒
-		time.Sleep(100 * time.Millisecond)
-		if err := process.Signal(syscall.Signal(0)); err != nil {
-			fmt.Fprintf(os.Stderr, "daemon stopped, pid=%d\n", pid)
-			os.Exit(0)
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "daemon did not stop in time, pid=%d\n", pid)
-	os.Exit(1)
-}
-
 func main() {
 	flag.Parse()
 
+	if flagLogs {
+		showLogs()
+	}
+
 	if flagStop {
 		stopDaemon()
+	}
+
+	if flagRestart {
+		restartDaemon()
 	}
 
 	// 父进程：fork 子进程后退出
@@ -212,47 +133,19 @@ func main() {
 
 	handler := proxy.NewReloadableHandler(server)
 
-	// 配置热重载函数
-	reloadConfig := func(trigger string) {
-		slog.Info("reloading config", "trigger", trigger, "path", cfgPath)
-
-		newCfg, err := config.Load(cfgPath)
-		if err != nil {
-			metrics.ConfigReloadsTotal.WithLabelValues("failure").Inc()
-			slog.Error("config reload failed, keeping current config", "error", err)
-			return
-		}
-
-		if newCfg.Server.ListenAddr != cfg.Server.ListenAddr {
-			slog.Warn("listen_addr changed, requires full restart to take effect",
-				"old", cfg.Server.ListenAddr,
-				"new", newCfg.Server.ListenAddr,
-			)
-		}
-
-		newServer, err := proxy.NewServer(newCfg)
-		if err != nil {
-			metrics.ConfigReloadsTotal.WithLabelValues("failure").Inc()
-			slog.Error("server rebuild failed, keeping current config", "error", err)
-			return
-		}
-
-		handler.Reload(newServer)
-		cfg = newCfg
-		metrics.ConfigReloadsTotal.WithLabelValues("success").Inc()
-		slog.Info("config reloaded successfully")
-	}
-
 	// 启动文件监听
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		slog.Error("failed to create file watcher", "error", err)
 	} else {
 		defer watcher.Close()
-		if err := watcher.Add(cfgPath); err != nil {
-			slog.Error("failed to watch config file", "path", cfgPath, "error", err)
+		cfgDir := filepath.Dir(cfgPath)
+		cfgFile := filepath.Base(cfgPath)
+
+		if err := watcher.Add(cfgDir); err != nil {
+			slog.Error("failed to watch config directory", "path", cfgDir, "error", err)
 		} else {
-			slog.Info("watching config file for changes", "path", cfgPath)
+			slog.Info("watching config file for changes", "path", cfgPath, "watch_dir", cfgDir)
 			go func() {
 				for {
 					select {
@@ -260,10 +153,13 @@ func main() {
 						if !ok {
 							return
 						}
-						if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
+						if filepath.Base(event.Name) != cfgFile {
+							continue
+						}
+						if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) != 0 {
 							// 延迟一点，等待文件写入完成
 							time.Sleep(100 * time.Millisecond)
-							reloadConfig("file_change")
+							reloadConfig(cfgPath, &cfg, handler, "file_change")
 						}
 					case err, ok := <-watcher.Errors:
 						if !ok {
@@ -296,7 +192,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	for sig := range sigCh {
 		if sig == syscall.SIGHUP {
-			reloadConfig("SIGHUP")
+			reloadConfig(cfgPath, &cfg, handler, "SIGHUP")
 			continue
 		}
 

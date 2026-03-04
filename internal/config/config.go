@@ -20,13 +20,14 @@ type Config struct {
 
 // ServerConfig controls HTTP server and upstream timeout behavior.
 type ServerConfig struct {
-	ListenAddr      string        `yaml:"listen_addr"`
-	ReadTimeout     time.Duration `yaml:"read_timeout"`
-	WriteTimeout    time.Duration `yaml:"write_timeout"`
-	IdleTimeout     time.Duration `yaml:"idle_timeout"`
-	UpstreamTimeout time.Duration `yaml:"upstream_timeout"`
-	Auth            AuthConfig    `yaml:"auth"`
-	Retry           RetryConfig   `yaml:"retry"`
+	ListenAddr          string        `yaml:"listen_addr"`
+	ReadTimeout         time.Duration `yaml:"read_timeout"`
+	WriteTimeout        time.Duration `yaml:"write_timeout"`
+	IdleTimeout         time.Duration `yaml:"idle_timeout"`
+	UpstreamTimeout     time.Duration `yaml:"upstream_timeout"`
+	MaxRequestBodyBytes int64         `yaml:"max_request_body_bytes"`
+	Auth                AuthConfig    `yaml:"auth"`
+	Retry               RetryConfig   `yaml:"retry"`
 }
 
 // RetryConfig controls upstream request retry behavior.
@@ -130,6 +131,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Server.UpstreamTimeout == 0 {
 		cfg.Server.UpstreamTimeout = 300 * time.Second
 	}
+	if cfg.Server.MaxRequestBodyBytes == 0 {
+		cfg.Server.MaxRequestBodyBytes = 8 * 1024 * 1024
+	}
 	if cfg.Server.Auth.Header == "" {
 		cfg.Server.Auth.Header = "Authorization"
 	}
@@ -180,6 +184,9 @@ func expandEnv(cfg *Config) {
 func validate(cfg Config) error {
 	if cfg.Server.Auth.Enabled && strings.TrimSpace(cfg.Server.Auth.Token) == "" {
 		return errors.New("server.auth.token cannot be empty when auth is enabled")
+	}
+	if cfg.Server.MaxRequestBodyBytes <= 0 {
+		return errors.New("server.max_request_body_bytes must be greater than 0")
 	}
 
 	if len(cfg.Providers) == 0 {
