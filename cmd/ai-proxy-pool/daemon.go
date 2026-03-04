@@ -18,36 +18,7 @@ import (
 
 // daemonize forks a new process to run as a background daemon.
 func daemonize() {
-	args := make([]string, 0, len(os.Args))
-	for _, arg := range os.Args[1:] {
-		if arg == "-d" ||
-			arg == "-stop" ||
-			arg == "-restart" ||
-			arg == "-logs" ||
-			arg == "-switch-config" ||
-			strings.HasPrefix(arg, "-switch-config=") {
-			continue
-		}
-		args = append(args, arg)
-	}
-
-	// 传递解析后的路径，确保子进程使用相同配置
-	hasConfig := false
-	hasLog := false
-	for _, arg := range args {
-		if arg == "-config" {
-			hasConfig = true
-		}
-		if arg == "-log" {
-			hasLog = true
-		}
-	}
-	if !hasConfig {
-		args = append(args, "-config", resolveConfigPath())
-	}
-	if !hasLog {
-		args = append(args, "-log", resolveLogPath())
-	}
+	args := []string{"run", "--config", resolveConfigPath(), "--log", resolveLogPath()}
 
 	cmd := exec.Command(os.Args[0], args...)
 	cmd.Env = append(os.Environ(), "_AI_PROXY_POOL_DAEMON=1")
@@ -98,32 +69,6 @@ func stopDaemonAndWait() (int, error) {
 	return 0, fmt.Errorf("daemon did not stop in time, pid=%d", pid)
 }
 
-// stopDaemon stops the running daemon and exits.
-func stopDaemon() {
-	pid, err := stopDaemonAndWait()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to stop daemon: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Fprintf(os.Stderr, "daemon stopped, pid=%d\n", pid)
-	os.Exit(0)
-}
-
-// restartDaemon stops the running daemon and starts a new one.
-func restartDaemon() {
-	pid, err := stopDaemonAndWait()
-	switch {
-	case err == nil:
-		fmt.Fprintf(os.Stderr, "daemon stopped, pid=%d\n", pid)
-	case errors.Is(err, os.ErrNotExist):
-		fmt.Fprintf(os.Stderr, "daemon not running, starting a new daemon\n")
-	default:
-		fmt.Fprintf(os.Stderr, "failed to restart daemon: %v\n", err)
-		os.Exit(1)
-	}
-
-	daemonize()
-}
 
 // showLogs displays and follows the log output with colored log levels.
 func showLogs() {

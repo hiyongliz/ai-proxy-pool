@@ -16,7 +16,7 @@ Go 实现的 Claude 多供应商智能代理服务。
 - 自动重试：5xx 错误或网络异常时自动切换到其他 provider
 - 热重载：配置文件修改后自动生效，无需重启
 - Prometheus 指标：`GET /metrics`
-- 后台守护进程模式（`-d`）
+- 后台守护进程模式（`appool start`）
 - 日志文件输出
 - 结构化请求/响应日志（含状态码、耗时、路由到的 provider）
 - 健康检查接口：`GET /healthz`
@@ -52,10 +52,10 @@ export ANTHROPIC_API_KEY_BACKUP=your_backup_key
 
 ```bash
 # 前台运行
-ai-proxy-pool
+appool run
 
 # 后台守护进程运行
-ai-proxy-pool -d
+appool start
 ```
 
 4. 请求示例：
@@ -81,19 +81,21 @@ curl -sS http://127.0.0.1:8080/v1/messages \
   -d '{"model":"claude-4-sonnet","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}'
 ```
 
-## 命令行参数
+## 命令行
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `-config` | 配置文件路径 | `~/.ai_proxy_pool/config.yaml` |
-| `-d` | 后台守护进程运行 | `false` |
-| `-stop` | 停止后台守护进程 | `false` |
-| `-restart` | 重启后台守护进程 | `false` |
-| `-logs` | 查看并持续跟随日志输出（带颜色高亮） | `false` |
-| `-switch-config` | 交互式选择并切换激活配置文件 | `false` |
-| `-log` | 日志文件路径 | `~/.ai_proxy_pool/ai-proxy-pool.log` |
+```bash
+appool run              # 前台运行服务器
+appool start            # 后台守护进程启动
+appool stop             # 停止后台进程
+appool restart          # 重启后台进程
+appool logs             # 查看并持续跟随日志输出（带颜色高亮）
+appool config           # 交互式选择并切换激活配置文件
+```
 
-**配置文件默认路径**：`~/.ai_proxy_pool/config.yaml`（可通过 `-config` 覆盖）
+| 全局选项 | 说明 | 默认值 |
+|----------|------|--------|
+| `-c, --config` | 配置文件路径 | `~/.ai_proxy_pool/config.yaml` |
+| `-l, --log` | 日志文件路径 | `~/.ai_proxy_pool/ai-proxy-pool.log` |
 
 ## 配置说明
 
@@ -173,13 +175,13 @@ make install  # 安装到 $GOPATH/bin
 ### 停止后台进程
 
 ```bash
-ai-proxy-pool -stop
+appool stop
 ```
 
 ### 重启后台进程
 
 ```bash
-ai-proxy-pool -restart
+appool restart
 ```
 
 ### 热重载配置
@@ -193,13 +195,13 @@ kill -HUP $(cat ~/.ai_proxy_pool/ai-proxy-pool.pid)
 ### 查看日志
 
 ```bash
-ai-proxy-pool -logs
+appool logs
 ```
 
 ### 交互切换配置文件
 
 ```bash
-ai-proxy-pool -switch-config
+appool config
 ```
 
 交互按键：`↑/↓` 或 `j/k` 选择，`Enter` 激活，`q`/`Esc` 退出。切换后自动通知运行中的 daemon 重新加载配置。
