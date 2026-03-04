@@ -1,4 +1,4 @@
-APP      := ai-proxy-pool
+APP      := appool
 PKG      := ./...
 GOFLAGS  := -trimpath
 
@@ -20,4 +20,4 @@ clean:
 	rm -f $(APP)
 
 install:
-	go install $(GOFLAGS) ./cmd/ai-proxy-pool
+	go build $(GOFLAGS) -o $(shell go env GOBIN)/$(APP) ./cmd/ai-proxy-pool
