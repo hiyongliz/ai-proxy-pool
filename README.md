@@ -89,7 +89,8 @@ curl -sS http://127.0.0.1:8080/v1/messages \
 | `-d` | 后台守护进程运行 | `false` |
 | `-stop` | 停止后台守护进程 | `false` |
 | `-restart` | 重启后台守护进程 | `false` |
-| `-logs` | 查看并持续跟随日志输出 | `false` |
+| `-logs` | 查看并持续跟随日志输出（带颜色高亮） | `false` |
+| `-switch-config` | 交互式选择并切换激活配置文件 | `false` |
 | `-log` | 日志文件路径 | `~/.ai_proxy_pool/ai-proxy-pool.log` |
 
 **配置文件默认路径**：`~/.ai_proxy_pool/config.yaml`（可通过 `-config` 覆盖）
@@ -194,6 +195,14 @@ kill -HUP $(cat ~/.ai_proxy_pool/ai-proxy-pool.pid)
 ```bash
 ai-proxy-pool -logs
 ```
+
+### 交互切换配置文件
+
+```bash
+ai-proxy-pool -switch-config
+```
+
+交互按键：`↑/↓` 或 `j/k` 选择，`Enter` 激活，`q`/`Esc` 退出。切换后自动通知运行中的 daemon 重新加载配置。
 
 ## License
 

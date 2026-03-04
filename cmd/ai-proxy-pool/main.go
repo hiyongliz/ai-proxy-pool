@@ -20,12 +20,13 @@ import (
 )
 
 var (
-	flagConfig  string
-	flagDaemon  bool
-	flagStop    bool
-	flagRestart bool
-	flagLogs    bool
-	flagLog     string
+	flagConfig       string
+	flagDaemon       bool
+	flagStop         bool
+	flagRestart      bool
+	flagLogs         bool
+	flagSwitchConfig bool
+	flagLog          string
 )
 
 func init() {
@@ -34,6 +35,7 @@ func init() {
 	flag.BoolVar(&flagStop, "stop", false, "stop the running daemon")
 	flag.BoolVar(&flagRestart, "restart", false, "restart the running daemon")
 	flag.BoolVar(&flagLogs, "logs", false, "show and follow log output")
+	flag.BoolVar(&flagSwitchConfig, "switch-config", false, "interactive switch active config from ~/.ai_proxy_pool/configs and ~/.ai_proxy_pool/config.yaml")
 	flag.StringVar(&flagLog, "log", "", "log file path (default: ~/.ai_proxy_pool/ai-proxy-pool.log)")
 }
 
@@ -56,6 +58,10 @@ func resolveLogPath() string {
 		return flagLog
 	}
 	return filepath.Join(defaultDir(), "ai-proxy-pool.log")
+}
+
+func resolveConfigsDir() string {
+	return filepath.Join(defaultDir(), "configs")
 }
 
 func pidPath() string {
@@ -82,6 +88,10 @@ func setupLogger(path string, daemon bool) (*os.File, error) {
 
 func main() {
 	flag.Parse()
+
+	if flagSwitchConfig {
+		switchConfigInteractive()
+	}
 
 	if flagLogs {
 		showLogs()

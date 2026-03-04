@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,13 +12,20 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // daemonize forks a new process to run as a background daemon.
 func daemonize() {
 	args := make([]string, 0, len(os.Args))
 	for _, arg := range os.Args[1:] {
-		if arg == "-d" || arg == "-stop" || arg == "-restart" || arg == "-logs" {
+		if arg == "-d" ||
+			arg == "-stop" ||
+			arg == "-restart" ||
+			arg == "-logs" ||
+			arg == "-switch-config" ||
+			strings.HasPrefix(arg, "-switch-config=") {
 			continue
 		}
 		args = append(args, arg)
@@ -117,14 +125,28 @@ func restartDaemon() {
 	daemonize()
 }
 
-// showLogs displays and follows the log output.
+// showLogs displays and follows the log output with colored log levels.
 func showLogs() {
 	path := resolveLogPath()
 	cmd := exec.Command("tail", "-n", "200", "-f", path)
-	cmd.Stdout = os.Stdout
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create pipe: %v\n", err)
+		os.Exit(1)
+	}
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to show logs: %v\n", err)
+		os.Exit(1)
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		fmt.Fprintln(os.Stdout, colorizeLine(scanner.Text()))
+	}
+
+	if err := cmd.Wait(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			switch exitErr.ExitCode() {
@@ -135,6 +157,65 @@ func showLogs() {
 		fmt.Fprintf(os.Stderr, "failed to show logs: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+var (
+	logTimeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	logInfoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	logWarnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	logErrorStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+	logAddrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("45"))
+	logNumStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+)
+
+// colorizeLine highlights fields in a slog text line.
+func colorizeLine(line string) string {
+	// Level coloring
+	switch {
+	case strings.Contains(line, "level=ERROR"):
+		line = strings.Replace(line, "level=ERROR", "level="+logErrorStyle.Render("ERROR"), 1)
+	case strings.Contains(line, "level=WARN"):
+		line = strings.Replace(line, "level=WARN", "level="+logWarnStyle.Render("WARN"), 1)
+	case strings.Contains(line, "level=INFO"):
+		line = strings.Replace(line, "level=INFO", "level="+logInfoStyle.Render("INFO"), 1)
+	}
+
+	// Time coloring: time=2026-03-03T17:01:18.985+08:00
+	if idx := strings.Index(line, "time="); idx >= 0 {
+		end := strings.Index(line[idx:], " ")
+		if end > 0 {
+			timeVal := line[idx+5 : idx+end]
+			line = strings.Replace(line, "time="+timeVal, "time="+logTimeStyle.Render(timeVal), 1)
+		}
+	}
+
+	// Address coloring: remote_addr, listen, upstream_host
+	for _, key := range []string{"remote_addr=", "listen=", "upstream_host="} {
+		if idx := strings.Index(line, key); idx >= 0 {
+			rest := line[idx+len(key):]
+			end := strings.Index(rest, " ")
+			if end < 0 {
+				end = len(rest)
+			}
+			val := rest[:end]
+			line = strings.Replace(line, key+val, key+logAddrStyle.Render(val), 1)
+		}
+	}
+
+	// Numeric values: status=, duration_ms=, response_bytes=
+	for _, key := range []string{"status=", "duration_ms=", "response_bytes="} {
+		if idx := strings.Index(line, key); idx >= 0 {
+			rest := line[idx+len(key):]
+			end := strings.Index(rest, " ")
+			if end < 0 {
+				end = len(rest)
+			}
+			val := rest[:end]
+			line = strings.Replace(line, key+val, key+logNumStyle.Render(val), 1)
+		}
+	}
+
+	return line
 }
 
 // writePID writes the current process ID to a file.
