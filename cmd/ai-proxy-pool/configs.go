@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -144,13 +145,43 @@ func (m switchConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeConfig = normalizedPath(selected)
 			signalDaemonReload()
 			return m, nil
+		case "e", "E":
+			if len(m.files) == 0 {
+				return m, nil
+			}
+			selected := m.files[m.cursor]
+			editor := os.Getenv("EDITOR")
+			if editor == "" {
+				editor = "vim"
+			}
+			cmd := exec.Command(editor, selected)
+			return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+				if err != nil {
+					return editorErrorMsg{err}
+				}
+				return editorFinishedMsg{selected}
+			})
 		case "q", "esc", "ctrl+c":
 			m.cancelled = true
 			return m, tea.Quit
 		}
+	case editorErrorMsg:
+		m.status = fmt.Sprintf("Error opening editor: %v", msg.err)
+		m.statusIsError = true
+		return m, nil
+	case editorFinishedMsg:
+		// Reload summaries when returning from editor
+		m.summaries[normalizedPath(msg.file)] = parseConfigSummary(msg.file)
+		// Edit finished cleanly, no explicit status needed
+		m.status = ""
+		m.statusIsError = false
+		return m, nil
 	}
 	return m, nil
 }
+
+type editorFinishedMsg struct{ file string }
+type editorErrorMsg struct{ err error }
 
 func (m switchConfigModel) View() string {
 	if len(m.files) == 0 {
@@ -236,6 +267,7 @@ func (m switchConfigModel) View() string {
 	b.WriteString(
 		tuiKeyStyle.Render("↑↓") + sep +
 			tuiKeyStyle.Render("Enter") + " Select" + sep +
+			tuiKeyStyle.Render("e") + " Edit" + sep +
 			tuiKeyStyle.Render("q") + " Quit\n",
 	)
 
@@ -254,6 +286,12 @@ func listConfigFiles(dir string) ([]string, error) {
 			continue
 		}
 		name := entry.Name()
+
+		// 隐藏最终激活生成的 ~/.ai_proxy_pool/config.yaml 文件
+		if filepath.Join(dir, name) == filepath.Join(defaultDir(), "config.yaml") {
+			continue
+		}
+
 		ext := strings.ToLower(filepath.Ext(name))
 		if ext != ".yaml" && ext != ".yml" {
 			continue
@@ -266,23 +304,7 @@ func listConfigFiles(dir string) ([]string, error) {
 }
 
 func appendLegacyConfigIfExists(files []string, configPath string) []string {
-	if configPath == "" {
-		return files
-	}
-	info, err := os.Stat(configPath)
-	if err != nil || info.IsDir() {
-		return files
-	}
-
-	target := normalizedPath(configPath)
-	for _, file := range files {
-		if normalizedPath(file) == target {
-			return files
-		}
-	}
-
-	files = append(files, configPath)
-	sort.Strings(files)
+	// 由于 config.yaml 仅作为目标激活文件，不再主动将其加回源配置供选列表
 	return files
 }
 
@@ -301,27 +323,12 @@ func activateConfig(sourcePath, targetPath string) error {
 		return fmt.Errorf("create target dir: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(targetDir, ".config-switch-*.yaml")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
+	// 推荐使用标准的 os.WriteFile 直接对目标文件重写
+	// 这包含了 O_WRONLY|O_CREATE|O_TRUNC 以及对应权限设定
+	if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+		return fmt.Errorf("write target config: %w", err)
 	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
 
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp config: %w", err)
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chmod temp config: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp config: %w", err)
-	}
-	if err := os.Rename(tmpPath, targetPath); err != nil {
-		return fmt.Errorf("replace active config: %w", err)
-	}
 	return nil
 }
 

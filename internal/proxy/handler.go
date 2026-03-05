@@ -120,7 +120,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	var excludedProviders []string
 	var lastErr error
-	var lastStatusCode int
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		selected, err := s.selector.Select(router.SelectionInput{
@@ -145,8 +144,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return // 成功，直接返回
 		}
 
+		if r.Context().Err() != nil {
+			// 客户端已主动断开，放弃重试
+			return
+		}
+
 		lastErr = upstreamErr
-		lastStatusCode = statusCode
 		excludedProviders = append(excludedProviders, selected.Name)
 
 		// 判断是否需要重试
@@ -176,13 +179,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 所有重试均失败
-	if lastStatusCode >= 500 {
-		writeJSON(w, lastStatusCode, map[string]string{
-			"error": fmt.Sprintf("upstream returned %d after %d attempts", lastStatusCode, maxAttempts),
-		})
-		return
-	}
+	// 所有重试均失败，且最后一次不为 5xx (5xx 已在 doUpstreamRequest 中直接推流返回)
 	writeJSON(w, http.StatusBadGateway, map[string]string{
 		"error": fmt.Sprintf("upstream request failed after %d attempts: %v", maxAttempts, lastErr),
 	})

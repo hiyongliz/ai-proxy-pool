@@ -29,6 +29,16 @@ var runCmd = &cobra.Command{
 	RunE:  runServer,
 }
 
+type colorWriter struct {
+	w io.Writer
+}
+
+func (cw *colorWriter) Write(p []byte) (n int, err error) {
+	colored := colorizeLine(string(p))
+	// 如果 colored 结尾没有换行符而原始数据有，补回来（尽管 slog.TextHandler 通常以 \n 结尾）
+	return cw.w.Write([]byte(colored))
+}
+
 func setupLogger(path string, daemon bool) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create log dir: %w", err)
@@ -38,13 +48,45 @@ func setupLogger(path string, daemon bool) (*os.File, error) {
 		return nil, fmt.Errorf("open log file: %w", err)
 	}
 
-	var w io.Writer = f
-	if !daemon {
-		// 前台运行：同时输出到 stdout 和日志文件
-		w = io.MultiWriter(os.Stdout, f)
+	if daemon {
+		slog.SetDefault(slog.New(slog.NewTextHandler(f, nil)))
+	} else {
+		// 前台运行：文件写原始文本，stdout 写美化后的文本
+		fileLogger := slog.NewTextHandler(f, nil)
+		stdoutHandler := slog.NewTextHandler(&colorWriter{os.Stdout}, nil)
+		// 采用简单的多写模式，分别往文件和带颜色包装的 stdout 输出
+		slog.SetDefault(slog.New(&multiHandler{fileLogger, stdoutHandler}))
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(w, nil)))
+
 	return f, nil
+}
+
+type multiHandler struct {
+	h1 slog.Handler
+	h2 slog.Handler
+}
+
+func (m *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return m.h1.Enabled(ctx, level) || m.h2.Enabled(ctx, level)
+}
+
+func (m *multiHandler) Handle(ctx context.Context, rec slog.Record) error {
+	_ = m.h1.Handle(ctx, rec)
+	return m.h2.Handle(ctx, rec)
+}
+
+func (m *multiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &multiHandler{
+		h1: m.h1.WithAttrs(attrs),
+		h2: m.h2.WithAttrs(attrs),
+	}
+}
+
+func (m *multiHandler) WithGroup(name string) slog.Handler {
+	return &multiHandler{
+		h1: m.h1.WithGroup(name),
+		h2: m.h2.WithGroup(name),
+	}
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
@@ -92,19 +134,25 @@ func runServer(cmd *cobra.Command, args []string) error {
 		} else {
 			slog.Info("watching config file for changes", "path", cfgPath, "watch_dir", cfgDir)
 			go func() {
+				var debounceTimer *time.Timer
 				for {
 					select {
 					case event, ok := <-watcher.Events:
 						if !ok {
 							return
 						}
+						// 只关注目标配置文件
 						if filepath.Base(event.Name) != cfgFile {
 							continue
 						}
 						if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) != 0 {
-							// 延迟一点，等待文件写入完成
-							time.Sleep(100 * time.Millisecond)
-							reloadConfig(cfgPath, &cfg, handler, "file_change")
+							// Debounce: 延迟 200ms 触发，合并连续的保存操作事件
+							if debounceTimer != nil {
+								debounceTimer.Stop()
+							}
+							debounceTimer = time.AfterFunc(200*time.Millisecond, func() {
+								reloadConfig(cfgPath, &cfg, handler, "file_change")
+							})
 						}
 					case err, ok := <-watcher.Errors:
 						if !ok {
@@ -133,14 +181,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	for sig := range sigCh {
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+
+	for sig := range done {
 		if sig == syscall.SIGHUP {
 			reloadConfig(cfgPath, &cfg, handler, "SIGHUP")
 			continue
 		}
-
 		// SIGINT or SIGTERM
 		break
 	}

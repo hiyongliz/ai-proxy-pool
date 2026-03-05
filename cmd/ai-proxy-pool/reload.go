@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
 	"github.com/hiyongliz/ai-proxy-pool/internal/metrics"
 	"github.com/hiyongliz/ai-proxy-pool/internal/proxy"
 )
+
+var cfgMutex sync.Mutex
 
 // reloadConfig reloads the configuration and rebuilds the server.
 func reloadConfig(
@@ -17,6 +20,9 @@ func reloadConfig(
 	handler *proxy.ReloadableHandler,
 	trigger string,
 ) {
+	cfgMutex.Lock()
+	defer cfgMutex.Unlock()
+
 	slog.Info("reloading config", "trigger", trigger, "path", cfgPath)
 
 	newCfg, err := config.Load(cfgPath)

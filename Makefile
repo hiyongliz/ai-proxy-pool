@@ -1,11 +1,17 @@
 APP      := appool
 PKG      := ./...
 GOFLAGS  := -trimpath
+VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+DATE     ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILT_BY ?= local
+GOBIN    ?= $(shell sh -c 'if [ -n "$$GOBIN" ]; then printf %s "$$GOBIN"; else printf %s "$$(go env GOPATH)/bin"; fi')
+LDFLAGS  := -X 'main.version=$(VERSION)' -X 'main.commit=$(COMMIT)' -X 'main.buildDate=$(DATE)' -X 'main.builtBy=$(BUILT_BY)'
 
 .PHONY: build run test lint clean install
 
 build:
-	go build $(GOFLAGS) -o $(APP) ./cmd/ai-proxy-pool
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(APP) ./cmd/ai-proxy-pool
 
 run: build
 	./$(APP)
@@ -20,4 +26,4 @@ clean:
 	rm -f $(APP)
 
 install:
-	go build $(GOFLAGS) -o $(shell go env GOBIN)/$(APP) ./cmd/ai-proxy-pool
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(GOBIN)/$(APP) ./cmd/ai-proxy-pool

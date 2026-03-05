@@ -38,7 +38,11 @@ func (s *Server) buildUpstreamRequest(inReq *http.Request, body []byte, provider
 	}
 
 	copyRequestHeaders(outReq.Header, inReq.Header)
-	replaceForwardedAPIKeyHeader(outReq, provider)
+
+	// Prevent leaking proxy credentials to upstream
+	outReq.Header.Del("Authorization")
+	outReq.Header.Del("X-Api-Key")
+
 	outReq.Host = mustHost(provider.BaseURL)
 	addForwardHeaders(outReq, inReq)
 	applyProviderAuth(outReq, provider)
@@ -95,18 +99,6 @@ func joinURLPath(parts ...string) string {
 		return "/"
 	}
 	return out
-}
-
-// replaceForwardedAPIKeyHeader handles the X-Api-Key header forwarding.
-func replaceForwardedAPIKeyHeader(outReq *http.Request, provider config.ProviderConfig) {
-	if outReq.Header.Get("X-Api-Key") == "" {
-		return
-	}
-	if provider.APIKey == "" {
-		outReq.Header.Del("X-Api-Key")
-		return
-	}
-	outReq.Header.Set("X-Api-Key", provider.APIKey)
 }
 
 // addForwardHeaders adds X-Forwarded-* headers to the outgoing request.

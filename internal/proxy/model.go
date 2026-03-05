@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -33,15 +34,23 @@ func extractModel(body []byte, contentType string) string {
 // replaceModel replaces the model field in a JSON body with a new model name.
 func replaceModel(body []byte, to string) []byte {
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&payload); err != nil {
 		return body
 	}
+
 	payload["model"] = to
-	replaced, err := json.Marshal(payload)
-	if err != nil {
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(payload); err != nil {
 		return body
 	}
-	return replaced
+
+	return bytes.TrimSpace(buf.Bytes())
 }
 
 // modelMetricLabel returns a normalized label for metrics based on the model name.
