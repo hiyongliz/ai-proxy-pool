@@ -17,9 +17,11 @@ Go 实现的 Claude 多供应商智能代理服务。
 - 热重载：配置文件修改后自动生效，无需重启
 - Prometheus 指标：`GET /metrics`
 - 后台守护进程模式（`appool start`）
+- daemon 状态检查（`appool status`）
 - 日志文件输出
 - 结构化请求/响应日志（含状态码、耗时、路由到的 provider）
 - 健康检查接口：`GET /healthz`
+- 版本信息输出（`appool version` / `--short` / `--json`）
 
 ## 安装
 
@@ -56,6 +58,9 @@ appool run
 
 # 后台守护进程运行
 appool start
+
+# 查看 daemon 状态
+appool status
 ```
 
 4. 请求示例：
@@ -88,8 +93,17 @@ appool run              # 前台运行服务器
 appool start            # 后台守护进程启动
 appool stop             # 停止后台进程
 appool restart          # 重启后台进程
+appool status           # 查看 daemon 状态
 appool logs             # 查看并持续跟随日志输出（带颜色高亮）
 appool config           # 交互式选择并切换激活配置文件
+appool version          # 查看版本信息
+```
+
+`appool version` 支持：
+
+```bash
+appool version --short  # 仅输出版本号
+appool version --json   # JSON 格式输出版本信息
 ```
 
 | 全局选项 | 说明 | 默认值 |
@@ -167,16 +181,24 @@ make run      # 编译并运行
 make test     # 运行测试
 make lint     # 代码检查
 make clean    # 清理构建产物
-make install  # 安装到 $GOPATH/bin
+make install  # 安装到 $GOBIN（未设置时回退到 $GOPATH/bin）
 ```
 
 ## 运维
+
+### 查看 daemon 状态
+
+```bash
+appool status
+```
 
 ### 停止后台进程
 
 ```bash
 appool stop
 ```
+
+说明：`appool stop` 是幂等的；如果 daemon 未运行，会输出 `daemon not running` 并返回成功状态。
 
 ### 重启后台进程
 
@@ -204,7 +226,15 @@ appool logs
 appool config
 ```
 
-交互按键：`↑/↓` 或 `j/k` 选择，`Enter` 激活，`q`/`Esc` 退出。切换后自动通知运行中的 daemon 重新加载配置。
+交互按键：`↑/↓` 或 `j/k` 选择，`Enter` 激活，`e` 编辑当前配置，`q`/`Esc` 退出。切换后自动通知运行中的 daemon 重新加载配置。
+
+### 查看版本
+
+```bash
+appool version
+appool version --short
+appool version --json
+```
 
 ## License
 

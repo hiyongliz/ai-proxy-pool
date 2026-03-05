@@ -113,6 +113,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config failed: path=%s, %w", cfgPath, err)
 	}
 
+	proxy.GetGlobalStats().LoadFromDisk()
+
 	server, err := proxy.NewServer(cfg)
 	if err != nil {
 		return fmt.Errorf("build proxy server failed: %w", err)
@@ -184,6 +186,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
+	// 后台定期落盘持久化
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	go func() {
+		for range ticker.C {
+			proxy.GetGlobalStats().Persist()
+		}
+	}()
+
 	for sig := range done {
 		if sig == syscall.SIGHUP {
 			reloadConfig(cfgPath, &cfg, handler, "SIGHUP")
@@ -199,6 +210,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err := httpServer.Shutdown(ctx); err != nil {
 		return fmt.Errorf("shutdown failed: %w", err)
 	}
+
+	// 退出前最后一次强制落盘
+	proxy.GetGlobalStats().Persist()
 
 	slog.Info("proxy server stopped")
 	return nil

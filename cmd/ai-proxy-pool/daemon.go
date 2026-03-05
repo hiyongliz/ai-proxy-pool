@@ -55,6 +55,10 @@ func stopDaemonAndWait() (int, error) {
 	}
 
 	if err := process.Signal(syscall.SIGTERM); err != nil {
+		if isProcessNotRunningError(err) {
+			_ = os.Remove(pidFile)
+			return 0, os.ErrNotExist
+		}
 		return 0, fmt.Errorf("send SIGTERM: %w", err)
 	}
 
@@ -63,6 +67,10 @@ func stopDaemonAndWait() (int, error) {
 		time.Sleep(100 * time.Millisecond)
 		// Signal(0) 返回 nil 表示进程还在运行，返回 err (如 ESRCH) 表示进程已退出
 		if err := process.Signal(syscall.Signal(0)); err != nil {
+			if !isProcessNotRunningError(err) {
+				return 0, fmt.Errorf("check daemon status: %w", err)
+			}
+			_ = os.Remove(pidFile)
 			return pid, nil
 		}
 	}
@@ -70,6 +78,21 @@ func stopDaemonAndWait() (int, error) {
 	return 0, fmt.Errorf("daemon did not stop in time, pid=%d", pid)
 }
 
+func isProcessNotRunningError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrProcessDone) {
+		return true
+	}
+	if errors.Is(err, syscall.ESRCH) {
+		return true
+	}
+
+	// 跨平台兜底：不同系统/Go 版本可能返回不同文本
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "process already finished") || strings.Contains(msg, "no such process")
+}
 
 // showLogs displays and follows the log output with colored log levels.
 func showLogs() {
@@ -106,12 +129,12 @@ func showLogs() {
 }
 
 var (
-	logTimeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	logInfoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	logWarnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	logErrorStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
-	logAddrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("45"))
-	logNumStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	logTimeStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	logInfoStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	logWarnStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	logErrorStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+	logAddrStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("45"))
+	logNumStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 	logStatus2xxStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	logStatus3xxStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("45"))
 	logStatus4xxStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -74,6 +75,7 @@ func (s *Server) buildHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/api/internal/status", s.handleStatus) // 新增纯本地管理的私有接口
 	mux.HandleFunc("/", s.handleProxy)
 	return s.loggingMiddleware(mux)
 }
@@ -139,10 +141,20 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		pStats := defaultStats.GetOrCreate(selected.Name)
+		atomic.AddInt64(&pStats.ActiveConnections, 1)
+
 		statusCode, upstreamErr := s.doUpstreamRequest(w, r, body, model, selected, attempt, maxAttempts)
+
+		atomic.AddInt64(&pStats.ActiveConnections, -1)
+		atomic.AddInt64(&pStats.TotalRequests, 1)
+
 		if upstreamErr == nil {
+			atomic.AddInt64(&pStats.SuccessRequests, 1)
 			return // 成功，直接返回
 		}
+
+		atomic.AddInt64(&pStats.ErrorRequests, 1)
 
 		if r.Context().Err() != nil {
 			// 客户端已主动断开，放弃重试
@@ -188,6 +200,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 // doUpstreamRequest 执行上游请求，返回 (HTTP状态码, 错误)。
 // 如果成功写入响应，错误为 nil；否则返回错误供重试决策。
 func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body []byte, model string, selected config.ProviderConfig, attempt, maxAttempts int) (int, error) {
+	pStats := defaultStats.GetOrCreate(selected.Name)
+
 	// 模型映射
 	upstreamModel := model
 	modelLabel := modelMetricLabel(model)
@@ -204,6 +218,11 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 	upstreamReq, err := s.buildUpstreamRequest(r, upstreamBody, selected)
 	if err != nil {
 		return 0, fmt.Errorf("build upstream request: %w", err)
+	}
+
+	// 简单解析请求体算一下 Input Token 估值 (按经验 1 token = 4 字节的粗略估算，如果 JSON 里有明确的 tokens 可提取更准)
+	if len(body) > 0 {
+		atomic.AddInt64(&pStats.PromptTokens, int64(len(body)/4))
 	}
 
 	client, ok := s.clients[selected.Name]
@@ -239,6 +258,8 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 	}
 	defer resp.Body.Close()
 
+	atomic.AddInt64(&pStats.TotalDurationMs, time.Since(upstreamStart).Milliseconds())
+
 	statusStr := strconv.Itoa(resp.StatusCode)
 	metrics.ProviderRequestsTotal.WithLabelValues(selected.Name, statusStr, modelLabel).Inc()
 	metrics.ProviderRequestDuration.WithLabelValues(selected.Name, modelLabel).Observe(time.Since(upstreamStart).Seconds())
@@ -262,6 +283,11 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 		)
 		// 响应已部分写入，无法重试
 		return resp.StatusCode, nil
+	}
+
+	atomic.AddInt64(&pStats.TotalBytes, written)
+	if written > 0 {
+		atomic.AddInt64(&pStats.CompletionTokens, written/4)
 	}
 
 	slog.Info("upstream response",
@@ -296,35 +322,44 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if requestID == "" {
 			requestID = strings.TrimSpace(r.Header.Get("X-Request-ID"))
 		}
-		slog.Info("http request",
-			"phase", "start",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"request_id", requestID,
-			"remote_addr", r.RemoteAddr,
-			"user_agent", r.UserAgent(),
-		)
+
+		// 过滤内部状态查询的日志
+		isInternalStatus := r.URL.Path == "/api/internal/status"
+
+		if !isInternalStatus {
+			slog.Info("http request",
+				"phase", "start",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"request_id", requestID,
+				"remote_addr", r.RemoteAddr,
+				"user_agent", r.UserAgent(),
+			)
+		}
 
 		recorder := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(recorder, r)
 
 		duration := time.Since(start)
-		statusStr := strconv.Itoa(recorder.StatusCode())
-		pathLabel := pathMetricLabel(r.URL.Path)
+		if !isInternalStatus {
+			statusStr := strconv.Itoa(recorder.StatusCode())
+			pathLabel := pathMetricLabel(r.URL.Path)
+			metrics.HTTPRequestsTotal.WithLabelValues(r.Method, pathLabel, statusStr).Inc()
+			metrics.HTTPRequestDuration.WithLabelValues(r.Method, pathLabel).Observe(duration.Seconds())
+		}
 
-		metrics.HTTPRequestsTotal.WithLabelValues(r.Method, pathLabel, statusStr).Inc()
-		metrics.HTTPRequestDuration.WithLabelValues(r.Method, pathLabel).Observe(duration.Seconds())
-
-		slog.Info("http request",
-			"phase", "finish",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"request_id", requestID,
-			"status", recorder.StatusCode(),
-			"duration_ms", duration.Milliseconds(),
-			"response_bytes", recorder.bytesWritten,
-			"selected_provider", recorder.Header().Get("X-Selected-Provider"),
-		)
+		if !isInternalStatus {
+			slog.Info("http request",
+				"phase", "finish",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"request_id", requestID,
+				"status", recorder.StatusCode(),
+				"duration_ms", duration.Milliseconds(),
+				"response_bytes", recorder.bytesWritten,
+				"selected_provider", recorder.Header().Get("X-Selected-Provider"),
+			)
+		}
 	})
 }
 
@@ -334,6 +369,8 @@ func pathMetricLabel(path string) string {
 		return "/healthz"
 	case "/metrics":
 		return "/metrics"
+	case "/api/internal/status":
+		return "/api/internal/status"
 	default:
 		return "/proxy"
 	}
