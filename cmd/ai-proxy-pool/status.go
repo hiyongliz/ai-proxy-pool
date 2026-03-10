@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/term"
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
 	"github.com/hiyongliz/ai-proxy-pool/internal/proxy"
 	"github.com/spf13/cobra"
@@ -41,7 +43,7 @@ func newStatusCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "refresh every second until Ctrl+C")
+	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "refresh every second until q or Ctrl+C")
 	return cmd
 }
 
@@ -61,7 +63,7 @@ func runStatus(out io.Writer, watch bool) error {
 		if err != nil {
 			return err
 		}
-		renderStatusDashboard(out, payload.Server, payload.Providers, cfg)
+		renderStatusDashboard(out, payload.Server, payload.Providers, cfg, false, statusDashboardWidth(out))
 		return nil
 	}
 
@@ -72,6 +74,16 @@ func runStatus(out io.Writer, watch bool) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
+	quitCh := make(chan struct{}, 1)
+	if file, ok := out.(*os.File); ok && term.IsTerminal(file.Fd()) {
+		state, err := term.MakeRaw(file.Fd())
+		if err == nil {
+			defer term.Restore(file.Fd(), state)
+			out = &crlfWriter{w: out}
+			go watchQuitKey(file, quitCh)
+		}
+	}
+
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -80,13 +92,14 @@ func runStatus(out io.Writer, watch bool) error {
 		if err != nil {
 			fmt.Fprintf(out, "\r\033[Kstatus fetch failed: %v\n", err)
 		} else {
-			// Clear screen and move cursor to top-left (top-like UI).
 			fmt.Fprint(out, "\033[H\033[2J")
-			renderStatusDashboard(out, payload.Server, payload.Providers, cfg)
+			renderStatusDashboard(out, payload.Server, payload.Providers, cfg, true, statusDashboardWidth(out))
 		}
 
 		select {
 		case <-sigCh:
+			return nil
+		case <-quitCh:
 			return nil
 		case <-ticker.C:
 		}
@@ -111,6 +124,27 @@ func fetchStatusPayload(client *http.Client, url string) (statusPayload, error) 
 	return payload, nil
 }
 
+func watchQuitKey(in io.Reader, quitCh chan<- struct{}) {
+	buf := make([]byte, 1)
+	for {
+		_, err := in.Read(buf)
+		if err != nil {
+			return
+		}
+		if shouldQuitWatchKey(buf[0]) {
+			select {
+			case quitCh <- struct{}{}:
+			default:
+			}
+			return
+		}
+	}
+}
+
+func shouldQuitWatchKey(key byte) bool {
+	return key == 'q' || key == 'Q'
+}
+
 func normalizeStatusAddr(addr string) string {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
@@ -122,14 +156,11 @@ func normalizeStatusAddr(addr string) string {
 	return addr
 }
 
-func renderStatusDashboard(out io.Writer, server map[string]any, stats map[string]proxy.ProviderStatView, cfg config.Config) {
+func renderStatusDashboard(out io.Writer, server map[string]any, stats map[string]proxy.ProviderStatView, cfg config.Config, watch bool, width int) {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42")).MarginBottom(1)
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).PaddingRight(2)
-	cellStyle := lipgloss.NewStyle().PaddingRight(2)
-	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).PaddingRight(2)
-	okStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).PaddingRight(2)
-	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220")).PaddingRight(2)
-	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).PaddingRight(2)
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
+	cellStyle := lipgloss.NewStyle()
+	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 	uptimeSeconds := asInt(server["uptime_seconds"])
 	uptime := time.Duration(uptimeSeconds) * time.Second
@@ -144,77 +175,144 @@ func renderStatusDashboard(out io.Writer, server map[string]any, stats map[strin
 	fmt.Fprintf(out, "  Strategy: %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render(strategy))
 	fmt.Fprintln(out)
 
-	colWidths := []int{20, 15, 12, 22, 18, 20}
-	headers := []string{"Provider", "Status", "Active", "Requests (Tot/Err)", "Avg Latency", "Throughput/Tokens"}
-	for i, h := range headers {
-		fmt.Fprint(out, padRight(headerStyle.Render(h), colWidths[i]))
+	rows := buildStatusRows(stats, cfg.Providers)
+	switch {
+	case width < 70:
+		renderStatusBlockLayout(out, rows, cellStyle, mutedStyle)
+	case width < 100:
+		renderStatusCompactTable(out, rows, width, headerStyle, mutedStyle)
+	default:
+		renderStatusFullTable(out, rows, width, headerStyle, mutedStyle)
 	}
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, mutedStyle.Render("-----------------------------------------------------------------------------------------------------------"))
 
+	fmt.Fprintln(out)
+	if watch {
+		fmt.Fprintln(out, mutedStyle.Render("Press q to quit"))
+	}
+}
+
+func buildStatusRows(stats map[string]proxy.ProviderStatView, providers []config.ProviderConfig) []statusRow {
 	var pNames []string
-	for _, p := range cfg.Providers {
+	for _, p := range providers {
 		pNames = append(pNames, p.Name)
 	}
 	sort.Strings(pNames)
 
+	rows := make([]statusRow, 0, len(pNames))
 	for _, name := range pNames {
 		isEnabled := false
-		for _, p := range cfg.Providers {
+		for _, p := range providers {
 			if p.Name == name {
 				isEnabled = p.EnabledOrDefault()
 				break
 			}
 		}
 
-		nameCell := cellStyle.Render(name)
-		statusCell := mutedStyle.Render("Disabled")
-		if isEnabled {
-			statusCell = okStyle.Render("Online")
-		}
-
 		stat, ok := stats[name]
+		row := statusRow{
+			Name:   name,
+			Status: "Disabled",
+			Active: "-",
+			Req:    "-",
+			Latency:"-",
+			Tokens: "-",
+		}
+		if isEnabled {
+			row.Status = "Online"
+			if stat.CircuitOpenUntil > time.Now().Unix() {
+				row.Status = "Melted"
+			}
+		}
 		if !ok || !isEnabled {
-			fmt.Fprintf(out, "%s%s%s%s%s%s\n",
-				padRight(nameCell, colWidths[0]),
-				padRight(statusCell, colWidths[1]),
-				padRight(mutedStyle.Render("-"), colWidths[2]),
-				padRight(mutedStyle.Render("-"), colWidths[3]),
-				padRight(mutedStyle.Render("-"), colWidths[4]),
-				padRight(mutedStyle.Render("-"), colWidths[5]),
-			)
+			rows = append(rows, row)
 			continue
 		}
 
-		activeCell := cellStyle.Render(fmt.Sprintf("%d", stat.ActiveConnections))
-
-		reqFmt := fmt.Sprintf("%d / %d", stat.TotalRequests, stat.ErrorRequests)
-		reqCell := cellStyle.Render(reqFmt)
-		if stat.ErrorRequests > 0 {
-			reqCell = errStyle.Render(reqFmt)
+		row.Active = fmt.Sprintf("%d", stat.ActiveConnections)
+		row.Req = fmt.Sprintf("%s/%s", formatCount(stat.TotalRequests), formatCount(stat.ErrorRequests))
+		if stat.AvgDurationMs > 0 {
+			row.Latency = fmt.Sprintf("%dms", stat.AvgDurationMs)
 		}
+		row.Throughput = fmt.Sprintf("%.2fMB", float64(stat.TotalBytes)/1024/1024)
+		row.Tokens = fmt.Sprintf("↑%s/↓%s", formatCount(stat.PromptTokens), formatCount(stat.CompletionTokens))
+		rows = append(rows, row)
+	}
+	return rows
+}
 
-		latencyStr := fmt.Sprintf("%dms", stat.AvgDurationMs)
-		latCell := cellStyle.Render(latencyStr)
-		if stat.AvgDurationMs > 3000 {
-			latCell = warnStyle.Render(latencyStr)
-		} else if stat.AvgDurationMs == 0 {
-			latCell = mutedStyle.Render("-")
-		}
+type statusRow struct {
+	Name       string
+	Status     string
+	Active     string
+	Req        string
+	Latency    string
+	Throughput string
+	Tokens     string
+}
 
-		mb := float64(stat.TotalBytes) / 1024 / 1024
-		tpCell := cellStyle.Render(fmt.Sprintf("%.2fMB ↑%d/↓%d", mb, stat.PromptTokens, stat.CompletionTokens))
+func renderStatusFullTable(out io.Writer, rows []statusRow, width int, headerStyle, mutedStyle lipgloss.Style) {
+	colWidths := statusColumnWidths(width)
+	headers := []string{"Provider", "Stat", "Act", "Req/Err", "Latency", "Thru/Tok"}
+	tableWidth := sumInts(colWidths)
 
-		fmt.Fprintf(out, "%s%s%s%s%s%s\n",
-			padRight(nameCell, colWidths[0]),
-			padRight(statusCell, colWidths[1]),
-			padRight(activeCell, colWidths[2]),
-			padRight(reqCell, colWidths[3]),
-			padRight(latCell, colWidths[4]),
-			padRight(tpCell, colWidths[5]),
-		)
+	for i, h := range headers {
+		fmt.Fprint(out, renderTableCell(headerStyle.Render(h), colWidths[i]))
 	}
 	fmt.Fprintln(out)
+	fmt.Fprintln(out, mutedStyle.Render(strings.Repeat("-", tableWidth)))
+
+	for _, row := range rows {
+		throughputTokens := row.Throughput
+		if throughputTokens == "-" {
+			throughputTokens = "-"
+		} else {
+			throughputTokens = row.Throughput + " " + row.Tokens
+		}
+		fmt.Fprintf(out, "%s%s%s%s%s%s\n",
+			renderTableCell(row.Name, colWidths[0]),
+			renderTableCell(row.Status, colWidths[1]),
+			renderTableCell(row.Active, colWidths[2]),
+			renderTableCell(row.Req, colWidths[3]),
+			renderTableCell(row.Latency, colWidths[4]),
+			renderTableCell(throughputTokens, colWidths[5]),
+		)
+	}
+}
+
+func renderStatusCompactTable(out io.Writer, rows []statusRow, width int, headerStyle, mutedStyle lipgloss.Style) {
+	colWidths := statusCompactColumnWidths(width)
+	headers := []string{"Provider", "Stat", "Req", "Lat", "Tok"}
+	tableWidth := sumInts(colWidths)
+
+	for i, h := range headers {
+		fmt.Fprint(out, renderTableCell(headerStyle.Render(h), colWidths[i]))
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, mutedStyle.Render(strings.Repeat("-", tableWidth)))
+
+	for _, row := range rows {
+		fmt.Fprintf(out, "%s%s%s%s%s\n",
+			renderTableCell(row.Name, colWidths[0]),
+			renderTableCell(row.Status, colWidths[1]),
+			renderTableCell(row.Req, colWidths[2]),
+			renderTableCell(row.Latency, colWidths[3]),
+			renderTableCell(row.Tokens, colWidths[4]),
+		)
+	}
+}
+
+func renderStatusBlockLayout(out io.Writer, rows []statusRow, cellStyle, mutedStyle lipgloss.Style) {
+	for i, row := range rows {
+		fmt.Fprintf(out, "Provider: %s\n", cellStyle.Render(row.Name))
+		fmt.Fprintf(out, "Status: %s\n", cellStyle.Render(row.Status))
+		fmt.Fprintf(out, "Active: %s\n", cellStyle.Render(row.Active))
+		fmt.Fprintf(out, "Requests: %s\n", cellStyle.Render(row.Req))
+		fmt.Fprintf(out, "Latency: %s\n", cellStyle.Render(row.Latency))
+		fmt.Fprintf(out, "Tokens: %s\n", cellStyle.Render(row.Tokens))
+		if i < len(rows)-1 {
+			fmt.Fprintln(out, mutedStyle.Render(strings.Repeat("-", 24)))
+		}
+	}
 }
 
 func asInt(v any) int {
@@ -247,10 +345,125 @@ func asString(v any) string {
 	}
 }
 
-func padRight(s string, width int) string {
-	padding := width - lipgloss.Width(s)
-	if padding < 0 {
-		return s
+func statusDashboardWidth(out io.Writer) int {
+	if file, ok := out.(*os.File); ok && term.IsTerminal(file.Fd()) {
+		width, _, err := term.GetSize(file.Fd())
+		if err == nil && width > 0 {
+			return width
+		}
 	}
-	return s + fmt.Sprintf("%*s", padding, "")
+	return 120
+}
+
+func statusColumnWidths(totalWidth int) []int {
+	base := []int{18, 10, 8, 18, 12, 20}
+	if totalWidth <= 0 {
+		return append([]int(nil), base...)
+	}
+
+	minWidths := []int{12, 8, 8, 14, 10, 16}
+	widths := append([]int(nil), base...)
+	current := sumInts(widths)
+	if current <= totalWidth {
+		widths[len(widths)-1] += totalWidth - current
+		return widths
+	}
+
+	for current > totalWidth {
+		changed := false
+		for index := len(widths) - 1; index >= 0 && current > totalWidth; index-- {
+			if widths[index] > minWidths[index] {
+				widths[index]--
+				current--
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+
+	return widths
+}
+
+func statusCompactColumnWidths(totalWidth int) []int {
+	base := []int{18, 10, 12, 10, 20}
+	if totalWidth <= 0 {
+		return append([]int(nil), base...)
+	}
+
+	minWidths := []int{12, 8, 9, 8, 12}
+	widths := append([]int(nil), base...)
+	current := sumInts(widths)
+	if current <= totalWidth {
+		widths[len(widths)-1] += totalWidth - current
+		return widths
+	}
+
+	for current > totalWidth {
+		changed := false
+		for index := len(widths) - 1; index >= 0 && current > totalWidth; index-- {
+			if widths[index] > minWidths[index] {
+				widths[index]--
+				current--
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+
+	return widths
+}
+
+func sumInts(values []int) int {
+	total := 0
+	for _, value := range values {
+		total += value
+	}
+	return total
+}
+
+// formatCount formats a number with k/m/b suffixes for readability.
+func formatCount(n int64) string {
+	switch {
+	case n >= 1_000_000_000:
+		return fmt.Sprintf("%.1fb", float64(n)/1_000_000_000)
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fm", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// crlfWriter wraps a writer and converts lone \n to \r\n,
+// which is required when the terminal is in raw mode.
+type crlfWriter struct {
+	w io.Writer
+}
+
+func (c *crlfWriter) Write(p []byte) (int, error) {
+	var buf bytes.Buffer
+	for _, b := range p {
+		if b == '\n' {
+			buf.WriteByte('\r')
+		}
+		buf.WriteByte(b)
+	}
+	n, err := c.w.Write(buf.Bytes())
+	if n > len(p) {
+		n = len(p)
+	}
+	return n, err
+}
+
+func renderTableCell(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	trimmed := lipgloss.NewStyle().MaxWidth(width).Render(s)
+	return lipgloss.NewStyle().Width(width).Render(trimmed)
 }

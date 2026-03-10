@@ -29,6 +29,12 @@ type ProviderStats struct {
 	TotalBytes        int64
 	PromptTokens      int64
 	CompletionTokens  int64
+
+	// 熔断器：连续致命错误计数器（遇顺畅包即归0）
+	ConsecutiveErrors int32
+
+	// 熔断器：熔断禁闭结束的时间戳(Unix 秒级)。如果当前时间 < 此值，拒绝路由
+	CircuitOpenUntil int64
 }
 
 // ProviderStatView is the JSON representation of provider stats.
@@ -42,6 +48,7 @@ type ProviderStatView struct {
 	TotalBytes        int64  `json:"total_bytes"`
 	PromptTokens      int64  `json:"prompt_tokens"`
 	CompletionTokens  int64  `json:"completion_tokens"`
+	CircuitOpenUntil  int64  `json:"circuit_open_until"`
 }
 
 // GlobalStats maintains statistics mapped by provider name.
@@ -80,6 +87,8 @@ func (g *GlobalStats) Snapshot() map[string]ProviderStatView {
 			avg = duration / total
 		}
 
+		openUntil := atomic.LoadInt64(&ps.CircuitOpenUntil)
+
 		m[name] = ProviderStatView{
 			Name:              name,
 			ActiveConnections: active,
@@ -90,6 +99,7 @@ func (g *GlobalStats) Snapshot() map[string]ProviderStatView {
 			TotalBytes:        bytes,
 			PromptTokens:      prompt,
 			CompletionTokens:  completion,
+			CircuitOpenUntil:  openUntil,
 		}
 		return true
 	})

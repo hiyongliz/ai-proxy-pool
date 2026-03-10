@@ -26,8 +26,16 @@ var hopByHopHeaders = map[string]struct{}{
 }
 
 // buildUpstreamRequest constructs an HTTP request for the upstream provider.
-func (s *Server) buildUpstreamRequest(inReq *http.Request, body []byte, provider config.ProviderConfig) (*http.Request, error) {
-	targetURL, err := buildUpstreamURL(provider, inReq.URL.Path, inReq.URL.RawQuery)
+func (s *Server) buildUpstreamRequest(inReq *http.Request, body []byte, provider config.ProviderConfig, upstreamPath string) (*http.Request, error) {
+	targetPath := inReq.URL.Path
+	if provider.UpstreamPath != "" {
+		targetPath = provider.UpstreamPath
+	}
+	if upstreamPath != "" {
+		targetPath = upstreamPath
+	}
+
+	targetURL, err := buildUpstreamURL(provider, targetPath, inReq.URL.RawQuery)
 	if err != nil {
 		return nil, fmt.Errorf("build upstream url: %w", err)
 	}
@@ -138,8 +146,11 @@ func applyProviderAuth(outReq *http.Request, provider config.ProviderConfig) {
 			headerName = "x-api-key"
 		}
 		outReq.Header.Set(headerName, provider.APIKey)
-	case "bearer", "auth_token", "auth-token":
+	case "bearer":
 		outReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	case "auth_token", "auth-token":
+		outReq.Header.Set("Authorization", "Bearer "+provider.APIKey)
+		outReq.Header.Set("X-Api-Key", provider.APIKey)
 	case "none":
 		return
 	default:

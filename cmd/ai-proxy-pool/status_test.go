@@ -42,10 +42,162 @@ func TestRenderStatusDashboardNoPanicOnMissingFields(t *testing.T) {
 			{Name: "p1", BaseURL: "https://example.com"},
 		},
 	}
-	renderStatusDashboard(&buf, map[string]any{}, map[string]proxy.ProviderStatView{}, cfg)
+	renderStatusDashboard(&buf, map[string]any{}, map[string]proxy.ProviderStatView{}, cfg, false, 120)
 	out := buf.String()
 	if !strings.Contains(out, "Strategy:") {
 		t.Fatalf("unexpected output: %q", out)
+	}
+	if strings.Contains(out, "Press q to quit") {
+		t.Fatalf("unexpected watch hint in non-watch mode: %q", out)
+	}
+}
+
+func TestRenderStatusDashboardWatchHint(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	cfg := config.Config{
+		Providers: []config.ProviderConfig{
+			{Name: "p1", BaseURL: "https://example.com"},
+		},
+	}
+	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, map[string]proxy.ProviderStatView{}, cfg, true, 120)
+	if !strings.Contains(buf.String(), "Press q to quit") {
+		t.Fatalf("expected watch hint, got=%q", buf.String())
+	}
+}
+
+func TestRenderStatusDashboardWatchHintDoesNotPadToTableWidth(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	cfg := config.Config{
+		Providers: []config.ProviderConfig{
+			{Name: "p1", BaseURL: "https://example.com"},
+		},
+	}
+
+	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, map[string]proxy.ProviderStatView{}, cfg, true, 80)
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatal("expected output lines")
+	}
+	if got := lines[len(lines)-1]; got != "Press q to quit" {
+		t.Fatalf("expected unpadded watch hint, got=%q full=%q", got, buf.String())
+	}
+}
+
+func TestRenderStatusDashboardUsesCompactTableOnMediumWidth(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	cfg := config.Config{
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: "https://example.com"}},
+	}
+	stats := map[string]proxy.ProviderStatView{
+		"p1": {
+			ActiveConnections: 1,
+			TotalRequests:     10,
+			ErrorRequests:     1,
+			AvgDurationMs:     120,
+			PromptTokens:      20,
+			CompletionTokens:  40,
+		},
+	}
+
+	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, stats, cfg, false, 85)
+	out := buf.String()
+	if !strings.Contains(out, "Provider") || !strings.Contains(out, "Req") || !strings.Contains(out, "Tokens") {
+		t.Fatalf("expected compact table headers, got=%q", out)
+	}
+	if strings.Contains(out, "Requests (Tot/Err)") || strings.Contains(out, "Throughput/Tokens") {
+		t.Fatalf("expected compact layout without wide headers, got=%q", out)
+	}
+}
+
+func TestRenderStatusDashboardUsesBlockLayoutOnNarrowWidth(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	cfg := config.Config{
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: "https://example.com"}},
+	}
+	stats := map[string]proxy.ProviderStatView{
+		"p1": {
+			ActiveConnections: 1,
+			TotalRequests:     10,
+			ErrorRequests:     1,
+			AvgDurationMs:     120,
+			PromptTokens:      20,
+			CompletionTokens:  40,
+		},
+	}
+
+	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, stats, cfg, false, 60)
+	out := buf.String()
+	for _, want := range []string{"Provider: p1", "Status: Online", "Requests: 10 / 1", "Latency: 120ms", "Tokens: ↑20 / ↓40"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected narrow layout to contain %q, got=%q", want, out)
+		}
+	}
+	if strings.Contains(out, "Requests (Tot/Err)") || strings.Contains(out, "Throughput/Tokens") {
+		t.Fatalf("expected block layout without table headers, got=%q", out)
+	}
+}
+
+func TestStatusColumnWidthsFitAvailableWidth(t *testing.T) {
+	t.Parallel()
+
+	widths := statusColumnWidths(80)
+	if len(widths) != 6 {
+		t.Fatalf("unexpected column count: %d", len(widths))
+	}
+
+	total := 0
+	for _, width := range widths {
+		if width < 8 {
+			t.Fatalf("column width too small: %d", width)
+		}
+		total += width
+	}
+
+	if total > 80 {
+		t.Fatalf("column widths overflow: total=%d widths=%v", total, widths)
+	}
+}
+
+func TestStatusColumnWidthsExpandWithAvailableWidth(t *testing.T) {
+	t.Parallel()
+
+	narrow := statusColumnWidths(80)
+	wide := statusColumnWidths(120)
+	if wide[len(wide)-1] <= narrow[len(narrow)-1] {
+		t.Fatalf("expected wider layout to expand last column: narrow=%v wide=%v", narrow, wide)
+	}
+}
+
+func TestShouldQuitWatchKey(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		key  byte
+		want bool
+	}{
+		{name: "lowercase q", key: 'q', want: true},
+		{name: "uppercase q", key: 'Q', want: true},
+		{name: "other key", key: 'x', want: false},
+		{name: "ctrl c", key: 3, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldQuitWatchKey(tc.key); got != tc.want {
+				t.Fatalf("shouldQuitWatchKey(%q): got=%v want=%v", tc.key, got, tc.want)
+			}
+		})
 	}
 }
 

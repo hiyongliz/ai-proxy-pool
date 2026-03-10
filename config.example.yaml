@@ -30,26 +30,44 @@ providers:
   - name: "claude-primary"
     base_url: "https://api.anthropic.com"
     path_prefix: "" # 如果你的上游网关是 /anthropic/v1，可配置为该前缀
+    upstream_path: "" # 可选：强制把请求转发到固定路径（如 /v1/responses）
     enabled: true
     weight: 5
     timeout: 300s
     api_key: "${ANTHROPIC_API_KEY_PRIMARY}"
     auth_type: "auth_token" # auth_token | bearer | x-api-key | none
     auth_header: "Authorization"
+    target_api: "claude" # claude | codex
+    request_translate: "none" # none | claude_to_codex (请求+响应双向转换)
     static_headers:
       anthropic-version: "2023-06-01"
     model_prefixes: ["claude-4", "claude-3"]
 
   - name: "claude-backup"
     base_url: "https://your-claude-compatible-provider.example.com"
+    upstream_path: ""
     enabled: true
     weight: 2
     timeout: 300s
     api_key: "${ANTHROPIC_API_KEY_BACKUP}"
     auth_type: "auth_token"
     auth_header: "Authorization"
+    target_api: "claude"
+    request_translate: "none"
     static_headers:
       anthropic-version: "2023-06-01"
     model_mapping:
       claude-opus-4-6: "claude-opus-4-5"   # 请求 claude-opus-4-6 时，上游实际使用 claude-opus-4-5
       claude-sonnet-4-6: "claude-sonnet-4-5"
+
+  # 示例：将 Claude 请求体转换为 Codex /v1/responses 请求体
+  - name: "codex-gateway"
+    base_url: "https://your-codex-gateway.example.com"
+    upstream_path: "/v1/responses"
+    enabled: false
+    weight: 1
+    timeout: 300s
+    api_key: "${CODEX_API_KEY}"
+    auth_type: "bearer"
+    target_api: "codex"
+    request_translate: "claude_to_codex"

@@ -594,3 +594,258 @@ func TestRetryDisabled(t *testing.T) {
 		t.Fatalf("expected 1 call (retry disabled), got %d", callCount.Load())
 	}
 }
+
+func TestClaudeToCodexRequestTranslate(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "resp_1",
+			"type":        "response",
+			"model":       "gpt-5-codex",
+			"stop_reason": "stop",
+			"usage": map[string]any{
+				"input_tokens":  10,
+				"output_tokens": 4,
+				"input_tokens_details": map[string]any{
+					"cached_tokens": 3,
+				},
+			},
+			"output": []any{
+				map[string]any{
+					"type": "message",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": "hello"},
+					},
+				},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+		},
+		Router: config.RouterConfig{
+			Strategy:        "round_robin",
+			DefaultProvider: "codex-1",
+		},
+		Providers: []config.ProviderConfig{
+			{
+				Name:             "codex-1",
+				BaseURL:          upstream.URL,
+				TargetAPI:        "codex",
+				RequestTranslate: "claude_to_codex",
+				AuthType:         "none",
+			},
+		},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":false,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("unexpected upstream path: %q", gotPath)
+	}
+	if gotBody["messages"] != nil {
+		t.Fatalf("expected translated body without messages, got=%v", gotBody["messages"])
+	}
+	if gotBody["input"] == nil {
+		t.Fatalf("expected translated body with input, got=%v", gotBody)
+	}
+
+	var clientResp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &clientResp); err != nil {
+		t.Fatalf("decode client response: %v", err)
+	}
+	if clientResp["type"] != "message" {
+		t.Fatalf("unexpected client response type: %v", clientResp["type"])
+	}
+	if clientResp["stop_reason"] != "stop" {
+		t.Fatalf("unexpected stop_reason: %v", clientResp["stop_reason"])
+	}
+	usage := clientResp["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(7) {
+		t.Fatalf("unexpected input_tokens: %v", usage["input_tokens"])
+	}
+}
+
+func TestClaudeToCodexResponseTranslateStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		stream := strings.Join([]string{
+			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5-codex"}}`,
+			"",
+			`data: {"type":"response.content_part.added"}`,
+			"",
+			`data: {"type":"response.output_text.delta","delta":"hello"}`,
+			"",
+			`data: {"type":"response.content_part.done"}`,
+			"",
+			`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":9,"output_tokens":5}}}`,
+			"",
+		}, "\n")
+		_, _ = io.WriteString(w, stream)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+		},
+		Router: config.RouterConfig{
+			Strategy:        "round_robin",
+			DefaultProvider: "codex-1",
+		},
+		Providers: []config.ProviderConfig{
+			{
+				Name:             "codex-1",
+				BaseURL:          upstream.URL,
+				TargetAPI:        "codex",
+				RequestTranslate: "claude_to_codex",
+				AuthType:         "none",
+			},
+		},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":true,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		"event: message_start",
+		"event: content_block_start",
+		"event: content_block_delta",
+		`"type":"text_delta"`,
+		"event: message_delta",
+		"event: message_stop",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected stream response to contain %q, got=%s", want, body)
+		}
+	}
+}
+
+func TestClaudeToCodexErrorResponsePassthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"type":"invalid_api_key","message":"bad key"}}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+		},
+		Router: config.RouterConfig{
+			Strategy:        "round_robin",
+			DefaultProvider: "codex-1",
+		},
+		Providers: []config.ProviderConfig{
+			{
+				Name:             "codex-1",
+				BaseURL:          upstream.URL,
+				TargetAPI:        "codex",
+				RequestTranslate: "claude_to_codex",
+				AuthType:         "none",
+			},
+		},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), `"type":"message"`) {
+		t.Fatalf("error response should not be translated: %s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"invalid_api_key"`) {
+		t.Fatalf("error response should be passed through: %s", rr.Body.String())
+	}
+}
+
+func TestClaudeToCodexTranslateFailureReturnsBadGateway(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "codex-1"},
+		Providers: []config.ProviderConfig{{
+			Name:             "codex-1",
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "upstream request failed") {
+		t.Fatalf("expected upstream failure message, got %s", rr.Body.String())
+	}
+}

@@ -12,6 +12,7 @@ Go 实现的 Claude 多供应商智能代理服务。
   - 按 `model_prefix` / `model_regex`
   - 按 `path_prefix`
 - 模型映射：每个 provider 可配置模型名替换规则
+- 协议转换：支持 `claude_to_codex`（Claude 请求 → Codex 请求，Codex 响应 → Claude 响应）
 - 自动注入上游鉴权（`auth_token`/`bearer`/`x-api-key`）
 - 自动重试：5xx 错误或网络异常时自动切换到其他 provider
 - 热重载：配置文件修改后自动生效，无需重启
@@ -149,11 +150,14 @@ appool version --json   # JSON 格式输出版本信息
 | `name` | 供应商名称（唯一标识） |
 | `base_url` | 上游地址 |
 | `path_prefix` | 上游路径前缀 |
+| `upstream_path` | 强制转发到固定上游路径（如 `/v1/responses`） |
 | `enabled` | 是否启用（默认 `true`） |
 | `weight` | 权重（用于 `weighted_random`） |
 | `timeout` | 单独超时设置 |
 | `api_key` | API Key（支持 `${ENV}`） |
 | `auth_type` | 鉴权方式：`auth_token`/`bearer`/`x-api-key`/`none` |
+| `target_api` | 上游 API 类型：`claude`/`codex` |
+| `request_translate` | 协议转换模式：`none`/`claude_to_codex`（同时作用于请求与响应） |
 | `static_headers` | 固定头（如 `anthropic-version`） |
 | `model_prefixes` | 模型前缀提示（用于路由） |
 | `model_mapping` | 模型名映射（见下方） |
@@ -172,6 +176,18 @@ providers:
 ```
 
 对客户端完全透明，日志中会记录映射信息。
+
+### Claude → Codex 请求转换
+
+当某个 provider 配置为：
+
+```yaml
+target_api: "codex"
+request_translate: "claude_to_codex"
+upstream_path: "/v1/responses"
+```
+
+代理会把客户端的 Claude 风格请求（如 `/v1/messages`）转换为 Codex Responses 风格请求并转发到该 provider；同时将 Codex 返回结果转换回 Claude 风格响应（包含 stream/non-stream）。
 
 ## Makefile 命令
 

@@ -123,6 +123,16 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	var excludedProviders []string
 	var lastErr error
 
+	// 第一阶段：筛选目前正在全局熔断期的 Provider，直接将其强行计入 `excludedProviders`
+	for _, p := range s.cfg.Providers {
+		if stat := defaultStats.GetOrCreate(p.Name); stat != nil {
+			openUntil := atomic.LoadInt64(&stat.CircuitOpenUntil)
+			if openUntil > 0 && time.Now().Unix() < openUntil {
+				excludedProviders = append(excludedProviders, p.Name)
+			}
+		}
+	}
+
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		selected, err := s.selector.Select(router.SelectionInput{
 			Path:              r.URL.Path,
@@ -151,10 +161,17 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 		if upstreamErr == nil {
 			atomic.AddInt64(&pStats.SuccessRequests, 1)
+			atomic.StoreInt32(&pStats.ConsecutiveErrors, 0)
 			return // 成功，直接返回
 		}
 
 		atomic.AddInt64(&pStats.ErrorRequests, 1)
+
+		var writeErr responseWriteError
+		if errors.As(upstreamErr, &writeErr) {
+			// 响应已开始写入且发生写失败，无法重试也不能再写 502
+			return
+		}
 
 		if r.Context().Err() != nil {
 			// 客户端已主动断开，放弃重试
@@ -166,6 +183,20 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 		// 判断是否需要重试
 		shouldRetry := false
+
+		// 判断连贯失误是否触及致命级熔断
+		if isProviderFatalError(statusCode, upstreamErr) {
+			fails := atomic.AddInt32(&pStats.ConsecutiveErrors, 1)
+			if fails >= 3 {
+				// 触发熔断：隔离 120 秒
+				atomic.StoreInt64(&pStats.CircuitOpenUntil, time.Now().Unix()+120)
+				slog.Warn("provider circuit breaker triggered", "provider", selected.Name, "duration", "120s")
+			}
+		} else {
+			// 非致命错误（比如 400 Bad Request），以及成功的 2xx/3xx，清零错误池
+			atomic.StoreInt32(&pStats.ConsecutiveErrors, 0)
+		}
+
 		if isNetworkError(upstreamErr) && retryCfg.RetryOnNetworkOrDefault() {
 			shouldRetry = true
 			metrics.ProviderRetriesTotal.WithLabelValues(selected.Name, "network_error").Inc()
@@ -206,16 +237,28 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 	upstreamModel := model
 	modelLabel := modelMetricLabel(model)
 	upstreamBody := body
-	if model != "" && len(selected.ModelMapping) > 0 {
-		if mapped, ok := selected.ModelMapping[model]; ok {
+	upstreamPath := r.URL.Path
+
+	translatedBody, translatedPath, translatedModel, err := translateRequestForProvider(selected, upstreamBody, upstreamModel, upstreamPath)
+	if err != nil {
+		return 0, fmt.Errorf("translate request for provider %q: %w", selected.Name, err)
+	}
+	upstreamBody = translatedBody
+	upstreamPath = translatedPath
+	upstreamModel = translatedModel
+	modelLabel = modelMetricLabel(upstreamModel)
+
+	if upstreamModel != "" && len(selected.ModelMapping) > 0 {
+		if mapped, ok := selected.ModelMapping[upstreamModel]; ok {
+			sourceModel := upstreamModel
 			upstreamModel = mapped
 			modelLabel = modelMetricLabel(mapped)
-			upstreamBody = replaceModel(body, mapped)
-			slog.Info("model mapped", "provider", selected.Name, "from", model, "to", mapped)
+			upstreamBody = replaceModel(upstreamBody, mapped)
+			slog.Info("model mapped", "provider", selected.Name, "from", sourceModel, "to", mapped)
 		}
 	}
 
-	upstreamReq, err := s.buildUpstreamRequest(r, upstreamBody, selected)
+	upstreamReq, err := s.buildUpstreamRequest(r, upstreamBody, selected, upstreamPath)
 	if err != nil {
 		return 0, fmt.Errorf("build upstream request: %w", err)
 	}
@@ -271,6 +314,62 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 		return resp.StatusCode, fmt.Errorf("upstream returned %d", resp.StatusCode)
 	}
 
+	if shouldTranslateResponse(selected) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		isStream := requestStreamOrDefault(body, false)
+		if contentType := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(contentType, "text/event-stream") {
+			isStream = true
+		}
+
+		copyResponseHeaders(w.Header(), resp.Header)
+		w.Header().Set("X-Selected-Provider", selected.Name)
+		w.Header().Del("Content-Length")
+
+		var written int64
+		if isStream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(resp.StatusCode)
+			written, err = translateStreamResponseForProvider(selected, body, w, resp.Body)
+		} else {
+			rawBody, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return resp.StatusCode, fmt.Errorf("read upstream body: %w", readErr)
+			}
+			translatedBody, translateErr := translateNonStreamResponseForProvider(selected, body, rawBody)
+			if translateErr != nil {
+				return resp.StatusCode, fmt.Errorf("translate upstream response: %w", translateErr)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(resp.StatusCode)
+			var n int
+			n, err = w.Write(translatedBody)
+			written = int64(n)
+		}
+		if err != nil {
+			slog.Error("proxy write translated response failed",
+				"provider", selected.Name,
+				"status", resp.StatusCode,
+				"error", err,
+			)
+			// 响应已部分写入，无法重试
+			return resp.StatusCode, responseWriteError{err: err}
+		}
+
+		atomic.AddInt64(&pStats.TotalBytes, written)
+		if written > 0 {
+			atomic.AddInt64(&pStats.CompletionTokens, written/4)
+		}
+
+		slog.Info("upstream response",
+			"provider", selected.Name,
+			"status", resp.StatusCode,
+			"duration_ms", time.Since(upstreamStart).Milliseconds(),
+			"response_bytes", written,
+			"attempt", attempt,
+		)
+		return resp.StatusCode, nil
+	}
+
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.Header().Set("X-Selected-Provider", selected.Name)
 	w.WriteHeader(resp.StatusCode)
@@ -282,7 +381,7 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 			"error", err,
 		)
 		// 响应已部分写入，无法重试
-		return resp.StatusCode, nil
+		return resp.StatusCode, responseWriteError{err: err}
 	}
 
 	atomic.AddInt64(&pStats.TotalBytes, written)
@@ -299,6 +398,26 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 	)
 
 	return resp.StatusCode, nil
+}
+
+type responseWriteError struct {
+	err error
+}
+
+func (e responseWriteError) Error() string {
+	if e.err == nil {
+		return "response write failed"
+	}
+	return e.err.Error()
+}
+
+func (e responseWriteError) Unwrap() error {
+	return e.err
+}
+
+func (e responseWriteError) Is(target error) bool {
+	_, ok := target.(responseWriteError)
+	return ok
 }
 
 func readRequestBodyWithLimit(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, error) {

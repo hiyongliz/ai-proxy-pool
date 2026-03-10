@@ -67,12 +67,12 @@ type switchConfigModel struct {
 
 // configSummary holds lightweight metadata for TUI display.
 type configSummary struct {
-	ProviderCount  int
-	EnabledCount   int
-	ListenAddr     string
-	Strategy       string
+	ProviderCount   int
+	EnabledCount    int
+	ListenAddr      string
+	Strategy        string
 	DefaultProvider string
-	ParseError     string
+	ParseError      string
 }
 
 var (
@@ -141,9 +141,20 @@ func (m switchConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err := writeSelectedConfigPath(selected); err != nil {
 				m.status = fmt.Sprintf("persist selection failed: %v", err)
 				m.statusIsError = true
+				return m, nil
 			}
 			m.activeConfig = normalizedPath(selected)
-			signalDaemonReload()
+			reloadResult := signalDaemonReload()
+			if reloadResult.signalSent {
+				m.status = fmt.Sprintf("activated: %s (daemon reloaded, pid=%d)", filepath.Base(selected), reloadResult.pid)
+				m.statusIsError = false
+			} else if reloadResult.daemonRunning {
+				m.status = fmt.Sprintf("activated: %s (daemon reload failed: %v)", filepath.Base(selected), reloadResult.err)
+				m.statusIsError = true
+			} else {
+				m.status = fmt.Sprintf("activated: %s (daemon not running)", filepath.Base(selected))
+				m.statusIsError = false
+			}
 			return m, nil
 		case "e", "E":
 			if len(m.files) == 0 {
@@ -172,9 +183,29 @@ func (m switchConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case editorFinishedMsg:
 		// Reload summaries when returning from editor
 		m.summaries[normalizedPath(msg.file)] = parseConfigSummary(msg.file)
-		// Edit finished cleanly, no explicit status needed
-		m.status = ""
-		m.statusIsError = false
+
+		// If the edited file is the currently active config, activate it and reload daemon
+		if normalizedPath(msg.file) == normalizedPath(m.activeConfig) {
+			if err := activateConfig(msg.file, m.activeTargetPath); err != nil {
+				m.status = fmt.Sprintf("failed to activate edited config: %v", err)
+				m.statusIsError = true
+				return m, nil
+			}
+			reloadResult := signalDaemonReload()
+			if reloadResult.signalSent {
+				m.status = fmt.Sprintf("config saved, daemon reloaded (pid=%d)", reloadResult.pid)
+				m.statusIsError = false
+			} else if reloadResult.daemonRunning {
+				m.status = fmt.Sprintf("config saved, daemon reload failed: %v", reloadResult.err)
+				m.statusIsError = true
+			} else {
+				m.status = "config saved (daemon not running)"
+				m.statusIsError = false
+			}
+		} else {
+			m.status = fmt.Sprintf("edited: %s (press Enter to activate)", filepath.Base(msg.file))
+			m.statusIsError = false
+		}
 		return m, nil
 	}
 	return m, nil
@@ -304,7 +335,17 @@ func listConfigFiles(dir string) ([]string, error) {
 }
 
 func appendLegacyConfigIfExists(files []string, configPath string) []string {
-	// 由于 config.yaml 仅作为目标激活文件，不再主动将其加回源配置供选列表
+	legacy := normalizedPath(configPath)
+	for _, file := range files {
+		if normalizedPath(file) == legacy {
+			return files
+		}
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		return files
+	}
+	// Keep legacy config at the front so users can still choose it explicitly.
+	files = append([]string{configPath}, files...)
 	return files
 }
 
@@ -452,19 +493,47 @@ func parseConfigSummary(path string) configSummary {
 	}
 }
 
+// signalDaemonReloadResult contains the result of attempting to reload the daemon.
+type signalDaemonReloadResult struct {
+	daemonRunning bool
+	signalSent    bool
+	pid           int
+	err           error
+}
+
 // signalDaemonReload sends SIGHUP to the running daemon to trigger config reload.
-func signalDaemonReload() {
+func signalDaemonReload() signalDaemonReloadResult {
+	result := signalDaemonReloadResult{}
+
 	data, err := os.ReadFile(pidPath())
 	if err != nil {
-		return // daemon not running
+		return result // daemon not running
 	}
+	result.daemonRunning = true
+
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
-		return
+		result.err = fmt.Errorf("invalid pid in file: %w", err)
+		return result
 	}
+	result.pid = pid
+
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return
+		result.err = fmt.Errorf("find process: %w", err)
+		return result
 	}
-	_ = proc.Signal(syscall.SIGHUP)
+
+	// Check if process is actually running
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		result.daemonRunning = false
+		return result
+	}
+
+	if err := proc.Signal(syscall.SIGHUP); err != nil {
+		result.err = fmt.Errorf("send SIGHUP: %w", err)
+		return result
+	}
+	result.signalSent = true
+	return result
 }

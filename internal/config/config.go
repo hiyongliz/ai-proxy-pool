@@ -79,19 +79,22 @@ type RouteRule struct {
 
 // ProviderConfig defines an upstream Claude-compatible provider.
 type ProviderConfig struct {
-	Name          string            `yaml:"name"`
-	BaseURL       string            `yaml:"base_url"`
-	PathPrefix    string            `yaml:"path_prefix"`
-	Enabled       *bool             `yaml:"enabled"`
-	Weight        int               `yaml:"weight"`
-	Timeout       time.Duration     `yaml:"timeout"`
-	APIKey        string            `yaml:"api_key"`
-	AuthType      string            `yaml:"auth_type"`
-	AuthHeader    string            `yaml:"auth_header"`
-	StaticHeaders map[string]string `yaml:"static_headers"`
-	ModelPrefixes []string          `yaml:"model_prefixes"`
-	ModelRegex    string            `yaml:"model_regex"`
-	ModelMapping  map[string]string `yaml:"model_mapping"`
+	Name             string            `yaml:"name"`
+	BaseURL          string            `yaml:"base_url"`
+	PathPrefix       string            `yaml:"path_prefix"`
+	UpstreamPath     string            `yaml:"upstream_path"`
+	Enabled          *bool             `yaml:"enabled"`
+	Weight           int               `yaml:"weight"`
+	Timeout          time.Duration     `yaml:"timeout"`
+	APIKey           string            `yaml:"api_key"`
+	AuthType         string            `yaml:"auth_type"`
+	AuthHeader       string            `yaml:"auth_header"`
+	TargetAPI        string            `yaml:"target_api"`
+	RequestTranslate string            `yaml:"request_translate"`
+	StaticHeaders    map[string]string `yaml:"static_headers"`
+	ModelPrefixes    []string          `yaml:"model_prefixes"`
+	ModelRegex       string            `yaml:"model_regex"`
+	ModelMapping     map[string]string `yaml:"model_mapping"`
 }
 
 // Load reads and validates YAML config from disk.
@@ -162,6 +165,14 @@ func applyDefaults(cfg *Config) {
 		if cfg.Providers[i].StaticHeaders == nil {
 			cfg.Providers[i].StaticHeaders = map[string]string{}
 		}
+		cfg.Providers[i].TargetAPI = strings.ToLower(strings.TrimSpace(cfg.Providers[i].TargetAPI))
+		if cfg.Providers[i].TargetAPI == "" {
+			cfg.Providers[i].TargetAPI = "claude"
+		}
+		cfg.Providers[i].RequestTranslate = strings.ToLower(strings.TrimSpace(cfg.Providers[i].RequestTranslate))
+		if cfg.Providers[i].RequestTranslate == "" {
+			cfg.Providers[i].RequestTranslate = "none"
+		}
 	}
 }
 
@@ -173,6 +184,7 @@ func expandEnv(cfg *Config) {
 	for i := range cfg.Providers {
 		cfg.Providers[i].BaseURL = os.ExpandEnv(cfg.Providers[i].BaseURL)
 		cfg.Providers[i].PathPrefix = os.ExpandEnv(cfg.Providers[i].PathPrefix)
+		cfg.Providers[i].UpstreamPath = os.ExpandEnv(cfg.Providers[i].UpstreamPath)
 		cfg.Providers[i].APIKey = os.ExpandEnv(cfg.Providers[i].APIKey)
 		cfg.Providers[i].AuthHeader = os.ExpandEnv(cfg.Providers[i].AuthHeader)
 		for k, v := range cfg.Providers[i].StaticHeaders {
@@ -211,6 +223,19 @@ func validate(cfg Config) error {
 
 		if p.BaseURL == "" {
 			return fmt.Errorf("provider %q base_url cannot be empty", p.Name)
+		}
+		switch p.TargetAPI {
+		case "", "claude", "codex":
+		default:
+			return fmt.Errorf("provider %q unsupported target_api %q", p.Name, p.TargetAPI)
+		}
+		switch p.RequestTranslate {
+		case "", "none", "claude_to_codex":
+		default:
+			return fmt.Errorf("provider %q unsupported request_translate %q", p.Name, p.RequestTranslate)
+		}
+		if p.RequestTranslate == "claude_to_codex" && p.TargetAPI != "codex" {
+			return fmt.Errorf("provider %q request_translate=claude_to_codex requires target_api=codex", p.Name)
 		}
 		parsed, err := url.Parse(p.BaseURL)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
