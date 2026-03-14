@@ -7,8 +7,8 @@ import (
 var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Interactive switch active config",
-	Run: func(cmd *cobra.Command, args []string) {
-		switchConfigInteractive()
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return switchConfigInteractive()
 	},
 }
 

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -16,7 +17,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats := defaultStats.Snapshot()
+	stats := s.stats.Snapshot()
 	payload := map[string]any{
 		"server": map[string]any{
 			"uptime_seconds": int(time.Since(serverStartTime).Seconds()),
@@ -30,7 +31,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(payload)
+	if err := encoder.Encode(payload); err != nil {
+		slog.Error("handleStatus encode failed", "error", err)
+	}
 }
 
 func isLoopbackRequest(remoteAddr string) bool {

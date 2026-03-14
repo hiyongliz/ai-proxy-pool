@@ -20,13 +20,38 @@ type streamState struct {
 	firstTextBlock            strings.Builder
 }
 
+// originalRequestInfo holds pre-parsed info from the original Claude request,
+// avoiding redundant JSON decoding of the same body.
+type originalRequestInfo struct {
+	reverseToolNameMap map[string]string
+	emitThinking       bool
+}
+
+func parseOriginalRequest(raw []byte) originalRequestInfo {
+	root, err := decodeObject(raw)
+	if err != nil {
+		return originalRequestInfo{
+			reverseToolNameMap: map[string]string{},
+		}
+	}
+	shortMap := buildToolShortNameMap(root)
+	rev := make(map[string]string, len(shortMap))
+	for original, short := range shortMap {
+		rev[short] = original
+	}
+	return originalRequestInfo{
+		reverseToolNameMap: rev,
+		emitThinking:       shouldIncludeReasoningSummary(root),
+	}
+}
+
 // ConvertCodexResponseToClaudeNonStream converts a non-stream Codex response body to Claude message format.
 func ConvertCodexResponseToClaudeNonStream(originalRequestRaw []byte, raw []byte) ([]byte, error) {
 	root, err := decodeObject(raw)
 	if err != nil {
 		return nil, fmt.Errorf("decode codex response: %w", err)
 	}
-	reverseToolNameMap := buildReverseToolNameMap(originalRequestRaw)
+	origInfo := parseOriginalRequest(originalRequestRaw)
 
 	response := root
 	if asString(root["type"]) == "response.completed" {
@@ -60,14 +85,13 @@ func ConvertCodexResponseToClaudeNonStream(originalRequestRaw []byte, raw []byte
 
 	content := make([]any, 0, 6)
 	hasToolCall := false
-	emitThinking := shouldIncludeReasoningSummaryFromOriginalRequest(originalRequestRaw)
 	trimLeadingDecorations := true
 
 	for _, itemRaw := range asSlice(response["output"]) {
 		item := asMap(itemRaw)
 		switch asString(item["type"]) {
 		case "reasoning":
-			if !emitThinking {
+			if !origInfo.emitThinking {
 				continue
 			}
 			if text := collectReasoningText(item); text != "" {
@@ -102,7 +126,7 @@ func ConvertCodexResponseToClaudeNonStream(originalRequestRaw []byte, raw []byte
 		case "function_call":
 			hasToolCall = true
 			name := asString(item["name"])
-			if originalName, ok := reverseToolNameMap[name]; ok {
+			if originalName, ok := origInfo.reverseToolNameMap[name]; ok {
 				name = originalName
 			}
 			toolBlock := map[string]any{
@@ -146,9 +170,10 @@ func ConvertCodexResponseToClaudeNonStream(originalRequestRaw []byte, raw []byte
 // ConvertCodexResponseToClaudeStream converts Codex SSE stream to Claude SSE stream.
 func ConvertCodexResponseToClaudeStream(originalRequestRaw []byte, w io.Writer, r io.Reader) (int64, error) {
 	var total int64
+	origInfo := parseOriginalRequest(originalRequestRaw)
 	state := &streamState{
-		reverseToolNameMap: buildReverseToolNameMap(originalRequestRaw),
-		emitThinking:       shouldIncludeReasoningSummaryFromOriginalRequest(originalRequestRaw),
+		reverseToolNameMap: origInfo.reverseToolNameMap,
+		emitThinking:       origInfo.emitThinking,
 		leadingTextPending: true,
 	}
 	type flusher interface {
@@ -222,67 +247,146 @@ func convertSingleCodexEventToClaudeSSE(raw []byte, state *streamState) (string,
 
 	switch asString(root["type"]) {
 	case "response.created":
-		response := asMap(root["response"])
-		payload := map[string]any{
-			"type": "message_start",
-			"message": map[string]any{
-				"id":            asString(response["id"]),
-				"type":          "message",
-				"role":          "assistant",
-				"model":         asString(response["model"]),
-				"stop_sequence": nil,
-				"usage": map[string]any{
-					"input_tokens":  0,
-					"output_tokens": 0,
-				},
-				"content":     []any{},
-				"stop_reason": nil,
-			},
-		}
-		return sse("message_start", payload)
+		return handleResponseCreated(root)
 	case "response.reasoning_summary_part.added":
-		if !state.emitThinking {
-			return "", nil
-		}
-		payload := map[string]any{
-			"type":  "content_block_start",
-			"index": state.blockIndex,
-			"content_block": map[string]any{
-				"type":     "thinking",
-				"thinking": "",
-			},
-		}
-		return sse("content_block_start", payload)
+		return handleReasoningSummaryPartAdded(state)
 	case "response.reasoning_summary_text.delta":
-		if !state.emitThinking {
-			return "", nil
-		}
-		payload := map[string]any{
-			"type":  "content_block_delta",
-			"index": state.blockIndex,
-			"delta": map[string]any{
-				"type":     "thinking_delta",
-				"thinking": asRawString(root["delta"]),
-			},
-		}
-		return sse("content_block_delta", payload)
+		return handleReasoningSummaryTextDelta(root, state)
 	case "response.reasoning_summary_part.done":
-		if !state.emitThinking {
-			return "", nil
-		}
-		payload := map[string]any{
-			"type":  "content_block_stop",
-			"index": state.blockIndex,
-		}
-		state.blockIndex++
-		return sse("content_block_stop", payload)
+		return handleReasoningSummaryPartDone(state)
 	case "response.content_part.added":
-		if state.leadingTextPending {
-			state.bufferingFirstTextBlock = true
-			state.firstTextBlock.Reset()
+		return handleContentPartAdded(state)
+	case "response.output_text.delta":
+		return handleOutputTextDelta(root, state)
+	case "response.content_part.done":
+		return handleContentPartDone(state)
+	case "response.output_item.added":
+		return handleOutputItemAdded(root, state)
+	case "response.function_call_arguments.delta":
+		return handleFunctionCallArgsDelta(root, state)
+	case "response.function_call_arguments.done":
+		return handleFunctionCallArgsDone(root, state)
+	case "response.output_item.done":
+		return handleOutputItemDone(root, state)
+	case "response.completed":
+		return handleResponseCompleted(root, state)
+	default:
+		return "", nil
+	}
+}
+
+func handleResponseCreated(root map[string]any) (string, error) {
+	response := asMap(root["response"])
+	payload := map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":            asString(response["id"]),
+			"type":          "message",
+			"role":          "assistant",
+			"model":         asString(response["model"]),
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+			"content":     []any{},
+			"stop_reason": nil,
+		},
+	}
+	return sse("message_start", payload)
+}
+
+func handleReasoningSummaryPartAdded(state *streamState) (string, error) {
+	if !state.emitThinking {
+		return "", nil
+	}
+	payload := map[string]any{
+		"type":  "content_block_start",
+		"index": state.blockIndex,
+		"content_block": map[string]any{
+			"type":     "thinking",
+			"thinking": "",
+		},
+	}
+	return sse("content_block_start", payload)
+}
+
+func handleReasoningSummaryTextDelta(root map[string]any, state *streamState) (string, error) {
+	if !state.emitThinking {
+		return "", nil
+	}
+	payload := map[string]any{
+		"type":  "content_block_delta",
+		"index": state.blockIndex,
+		"delta": map[string]any{
+			"type":     "thinking_delta",
+			"thinking": asRawString(root["delta"]),
+		},
+	}
+	return sse("content_block_delta", payload)
+}
+
+func handleReasoningSummaryPartDone(state *streamState) (string, error) {
+	if !state.emitThinking {
+		return "", nil
+	}
+	payload := map[string]any{
+		"type":  "content_block_stop",
+		"index": state.blockIndex,
+	}
+	state.blockIndex++
+	return sse("content_block_stop", payload)
+}
+
+func handleContentPartAdded(state *streamState) (string, error) {
+	if state.leadingTextPending {
+		state.bufferingFirstTextBlock = true
+		state.firstTextBlock.Reset()
+		return "", nil
+	}
+	payload := map[string]any{
+		"type":  "content_block_start",
+		"index": state.blockIndex,
+		"content_block": map[string]any{
+			"type": "text",
+			"text": "",
+		},
+	}
+	return sse("content_block_start", payload)
+}
+
+func handleOutputTextDelta(root map[string]any, state *streamState) (string, error) {
+	if state.bufferingFirstTextBlock {
+		state.firstTextBlock.WriteString(asRawString(root["delta"]))
+		return "", nil
+	}
+	payload := map[string]any{
+		"type":  "content_block_delta",
+		"index": state.blockIndex,
+		"delta": map[string]any{
+			"type": "text_delta",
+			"text": asRawString(root["delta"]),
+		},
+	}
+	return sse("content_block_delta", payload)
+}
+
+func handleContentPartDone(state *streamState) (string, error) {
+	if state.bufferingFirstTextBlock {
+		original := state.firstTextBlock.String()
+		cleaned, removed := removeLeadingCodexDecoration(original)
+		state.bufferingFirstTextBlock = false
+		state.firstTextBlock.Reset()
+
+		if strings.TrimSpace(cleaned) == "" {
+			if !removed {
+				state.leadingTextPending = false
+			}
 			return "", nil
 		}
-		payload := map[string]any{
+		state.leadingTextPending = false
+
+		startPayload := map[string]any{
 			"type":  "content_block_start",
 			"index": state.blockIndex,
 			"content_block": map[string]any{
@@ -290,104 +394,17 @@ func convertSingleCodexEventToClaudeSSE(raw []byte, state *streamState) (string,
 				"text": "",
 			},
 		}
-		return sse("content_block_start", payload)
-	case "response.output_text.delta":
-		if state.bufferingFirstTextBlock {
-			state.firstTextBlock.WriteString(asRawString(root["delta"]))
-			return "", nil
-		}
-		payload := map[string]any{
-			"type":  "content_block_delta",
-			"index": state.blockIndex,
-			"delta": map[string]any{
-				"type": "text_delta",
-				"text": asRawString(root["delta"]),
-			},
-		}
-		return sse("content_block_delta", payload)
-	case "response.content_part.done":
-		if state.bufferingFirstTextBlock {
-			original := state.firstTextBlock.String()
-			cleaned, removed := removeLeadingCodexDecoration(original)
-			state.bufferingFirstTextBlock = false
-			state.firstTextBlock.Reset()
-
-			if strings.TrimSpace(cleaned) == "" {
-				if !removed {
-					state.leadingTextPending = false
-				}
-				return "", nil
-			}
-			state.leadingTextPending = false
-
-			startPayload := map[string]any{
-				"type":  "content_block_start",
-				"index": state.blockIndex,
-				"content_block": map[string]any{
-					"type": "text",
-					"text": "",
-				},
-			}
-			deltaPayload := map[string]any{
-				"type":  "content_block_delta",
-				"index": state.blockIndex,
-				"delta": map[string]any{
-					"type": "text_delta",
-					"text": cleaned,
-				},
-			}
-			stopPayload := map[string]any{
-				"type":  "content_block_stop",
-				"index": state.blockIndex,
-			}
-
-			a, err := sse("content_block_start", startPayload)
-			if err != nil {
-				return "", err
-			}
-			b, err := sse("content_block_delta", deltaPayload)
-			if err != nil {
-				return "", err
-			}
-			c, err := sse("content_block_stop", stopPayload)
-			if err != nil {
-				return "", err
-			}
-			state.blockIndex++
-			return a + b + c, nil
-		}
-		payload := map[string]any{
-			"type":  "content_block_stop",
-			"index": state.blockIndex,
-		}
-		state.blockIndex++
-		return sse("content_block_stop", payload)
-	case "response.output_item.added":
-		item := asMap(root["item"])
-		if asString(item["type"]) != "function_call" {
-			return "", nil
-		}
-		state.hasToolCall = true
-		state.leadingTextPending = false
-		state.hasReceivedArgumentsDelta = false
-
-		startPayload := map[string]any{
-			"type":  "content_block_start",
-			"index": state.blockIndex,
-			"content_block": map[string]any{
-				"type":  "tool_use",
-				"id":    asString(item["call_id"]),
-				"name":  restoreOriginalToolName(state.reverseToolNameMap, asString(item["name"])),
-				"input": map[string]any{},
-			},
-		}
 		deltaPayload := map[string]any{
 			"type":  "content_block_delta",
 			"index": state.blockIndex,
 			"delta": map[string]any{
-				"type":         "input_json_delta",
-				"partial_json": "",
+				"type": "text_delta",
+				"text": cleaned,
 			},
+		}
+		stopPayload := map[string]any{
+			"type":  "content_block_stop",
+			"index": state.blockIndex,
 		}
 
 		a, err := sse("content_block_start", startPayload)
@@ -398,87 +415,143 @@ func convertSingleCodexEventToClaudeSSE(raw []byte, state *streamState) (string,
 		if err != nil {
 			return "", err
 		}
-		return a + b, nil
-	case "response.function_call_arguments.delta":
-		state.hasReceivedArgumentsDelta = true
-		payload := map[string]any{
-			"type":  "content_block_delta",
-			"index": state.blockIndex,
-			"delta": map[string]any{
-				"type":         "input_json_delta",
-				"partial_json": asRawString(root["delta"]),
-			},
-		}
-		return sse("content_block_delta", payload)
-	case "response.function_call_arguments.done":
-		if state.hasReceivedArgumentsDelta {
-			return "", nil
-		}
-		args := asRawString(root["arguments"])
-		if args == "" {
-			return "", nil
-		}
-		payload := map[string]any{
-			"type":  "content_block_delta",
-			"index": state.blockIndex,
-			"delta": map[string]any{
-				"type":         "input_json_delta",
-				"partial_json": args,
-			},
-		}
-		return sse("content_block_delta", payload)
-	case "response.output_item.done":
-		item := asMap(root["item"])
-		if asString(item["type"]) != "function_call" {
-			return "", nil
-		}
-		payload := map[string]any{
-			"type":  "content_block_stop",
-			"index": state.blockIndex,
+		c, err := sse("content_block_stop", stopPayload)
+		if err != nil {
+			return "", err
 		}
 		state.blockIndex++
-		return sse("content_block_stop", payload)
-	case "response.completed":
-		response := asMap(root["response"])
-		stopReason := asString(response["stop_reason"])
-		switch {
-		case state.hasToolCall:
-			stopReason = "tool_use"
-		case stopReason == "max_tokens" || stopReason == "stop":
-		default:
-			stopReason = "end_turn"
-		}
-		inputTokens, outputTokens, cached := extractUsage(asMap(response["usage"]))
+		return a + b + c, nil
+	}
+	payload := map[string]any{
+		"type":  "content_block_stop",
+		"index": state.blockIndex,
+	}
+	state.blockIndex++
+	return sse("content_block_stop", payload)
+}
 
-		messageDelta := map[string]any{
-			"type": "message_delta",
-			"delta": map[string]any{
-				"stop_reason":   stopReason,
-				"stop_sequence": nil,
-			},
-			"usage": map[string]any{
-				"input_tokens":  inputTokens,
-				"output_tokens": outputTokens,
-			},
-		}
-		if cached > 0 {
-			usage := asMap(messageDelta["usage"])
-			usage["cache_read_input_tokens"] = cached
-			messageDelta["usage"] = usage
-		}
-
-		a, err := sse("message_delta", messageDelta)
-		if err != nil {
-			return "", err
-		}
-		b, err := sse("message_stop", map[string]any{"type": "message_stop"})
-		if err != nil {
-			return "", err
-		}
-		return a + b, nil
-	default:
+func handleOutputItemAdded(root map[string]any, state *streamState) (string, error) {
+	item := asMap(root["item"])
+	if asString(item["type"]) != "function_call" {
 		return "", nil
 	}
+	state.hasToolCall = true
+	state.leadingTextPending = false
+	state.hasReceivedArgumentsDelta = false
+
+	startPayload := map[string]any{
+		"type":  "content_block_start",
+		"index": state.blockIndex,
+		"content_block": map[string]any{
+			"type":  "tool_use",
+			"id":    asString(item["call_id"]),
+			"name":  restoreOriginalToolName(state.reverseToolNameMap, asString(item["name"])),
+			"input": map[string]any{},
+		},
+	}
+	deltaPayload := map[string]any{
+		"type":  "content_block_delta",
+		"index": state.blockIndex,
+		"delta": map[string]any{
+			"type":         "input_json_delta",
+			"partial_json": "",
+		},
+	}
+
+	a, err := sse("content_block_start", startPayload)
+	if err != nil {
+		return "", err
+	}
+	b, err := sse("content_block_delta", deltaPayload)
+	if err != nil {
+		return "", err
+	}
+	return a + b, nil
+}
+
+func handleFunctionCallArgsDelta(root map[string]any, state *streamState) (string, error) {
+	state.hasReceivedArgumentsDelta = true
+	payload := map[string]any{
+		"type":  "content_block_delta",
+		"index": state.blockIndex,
+		"delta": map[string]any{
+			"type":         "input_json_delta",
+			"partial_json": asRawString(root["delta"]),
+		},
+	}
+	return sse("content_block_delta", payload)
+}
+
+func handleFunctionCallArgsDone(root map[string]any, state *streamState) (string, error) {
+	if state.hasReceivedArgumentsDelta {
+		return "", nil
+	}
+	args := asRawString(root["arguments"])
+	if args == "" {
+		return "", nil
+	}
+	payload := map[string]any{
+		"type":  "content_block_delta",
+		"index": state.blockIndex,
+		"delta": map[string]any{
+			"type":         "input_json_delta",
+			"partial_json": args,
+		},
+	}
+	return sse("content_block_delta", payload)
+}
+
+func handleOutputItemDone(root map[string]any, state *streamState) (string, error) {
+	item := asMap(root["item"])
+	if asString(item["type"]) != "function_call" {
+		return "", nil
+	}
+	payload := map[string]any{
+		"type":  "content_block_stop",
+		"index": state.blockIndex,
+	}
+	state.blockIndex++
+	return sse("content_block_stop", payload)
+}
+
+func handleResponseCompleted(root map[string]any, state *streamState) (string, error) {
+	response := asMap(root["response"])
+	stopReason := asString(response["stop_reason"])
+	switch {
+	case state.hasToolCall:
+		stopReason = "tool_use"
+	case stopReason == "max_tokens" || stopReason == "stop":
+	default:
+		stopReason = "end_turn"
+	}
+	inputTokens, outputTokens, cached := extractUsage(asMap(response["usage"]))
+
+	messageDelta := map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   stopReason,
+			"stop_sequence": nil,
+		},
+		"usage": map[string]any{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+		},
+	}
+	if cached > 0 {
+		usage := asMap(messageDelta["usage"])
+		usage["cache_read_input_tokens"] = cached
+		messageDelta["usage"] = usage
+	}
+
+	a, err := sse("message_delta", messageDelta)
+	if err != nil {
+		return "", err
+	}
+	b, err := sse("message_stop", map[string]any{"type": "message_stop"})
+	if err != nil {
+		return "", err
+	}
+	return a + b, nil
 }
 
 func sse(event string, payload map[string]any) (string, error) {
@@ -551,32 +624,11 @@ func collectReasoningText(item map[string]any) string {
 	return strings.Join(parts, "")
 }
 
-func buildReverseToolNameMap(originalRequestRaw []byte) map[string]string {
-	root, err := decodeObject(originalRequestRaw)
-	if err != nil {
-		return map[string]string{}
-	}
-	shortMap := buildToolShortNameMap(root)
-	rev := make(map[string]string, len(shortMap))
-	for original, short := range shortMap {
-		rev[short] = original
-	}
-	return rev
-}
-
 func restoreOriginalToolName(reverse map[string]string, current string) string {
 	if original, ok := reverse[current]; ok {
 		return original
 	}
 	return current
-}
-
-func shouldIncludeReasoningSummaryFromOriginalRequest(originalRequestRaw []byte) bool {
-	root, err := decodeObject(originalRequestRaw)
-	if err != nil {
-		return false
-	}
-	return shouldIncludeReasoningSummary(root)
 }
 
 func removeLeadingCodexDecoration(text string) (string, bool) {

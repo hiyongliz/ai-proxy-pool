@@ -229,12 +229,12 @@ func buildStatusRows(stats map[string]proxy.ProviderStatView, providers []config
 		}
 
 		row.Active = fmt.Sprintf("%d", stat.ActiveConnections)
-		row.Req = fmt.Sprintf("%s/%s", formatCount(stat.TotalRequests), formatCount(stat.ErrorRequests))
+		row.Req = fmt.Sprintf("%s / %s", formatCount(stat.TotalRequests), formatCount(stat.ErrorRequests))
 		if stat.AvgDurationMs > 0 {
 			row.Latency = fmt.Sprintf("%dms", stat.AvgDurationMs)
 		}
 		row.Throughput = fmt.Sprintf("%.2fMB", float64(stat.TotalBytes)/1024/1024)
-		row.Tokens = fmt.Sprintf("↑%s/↓%s", formatCount(stat.PromptTokens), formatCount(stat.CompletionTokens))
+		row.Tokens = fmt.Sprintf("↑%s / ↓%s", formatCount(stat.PromptTokens), formatCount(stat.CompletionTokens))
 		rows = append(rows, row)
 	}
 	return rows
@@ -281,7 +281,7 @@ func renderStatusFullTable(out io.Writer, rows []statusRow, width int, headerSty
 
 func renderStatusCompactTable(out io.Writer, rows []statusRow, width int, headerStyle, mutedStyle lipgloss.Style) {
 	colWidths := statusCompactColumnWidths(width)
-	headers := []string{"Provider", "Stat", "Req", "Lat", "Tok"}
+	headers := []string{"Provider", "Stat", "Req", "Lat", "Tokens"}
 	tableWidth := sumInts(colWidths)
 
 	for i, h := range headers {

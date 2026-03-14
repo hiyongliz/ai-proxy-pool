@@ -11,6 +11,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Strategy constants.
+const (
+	StrategyRoundRobin     = "round_robin"
+	StrategyWeightedRandom = "weighted_random"
+)
+
+// TargetAPI constants.
+const (
+	TargetAPIClaude = "claude"
+	TargetAPICodex  = "codex"
+)
+
+// RequestTranslate constants.
+const (
+	TranslateNone          = "none"
+	TranslateClaudeToCodex = "claude_to_codex"
+)
+
 // Config is the root configuration for the proxy application.
 type Config struct {
 	Server    ServerConfig     `yaml:"server"`
@@ -26,6 +44,7 @@ type ServerConfig struct {
 	IdleTimeout         time.Duration `yaml:"idle_timeout"`
 	UpstreamTimeout     time.Duration `yaml:"upstream_timeout"`
 	MaxRequestBodyBytes int64         `yaml:"max_request_body_bytes"`
+	ExposeProvider      *bool         `yaml:"expose_provider"`
 	Auth                AuthConfig    `yaml:"auth"`
 	Retry               RetryConfig   `yaml:"retry"`
 }
@@ -149,11 +168,13 @@ func applyDefaults(cfg *Config) {
 	}
 
 	if cfg.Router.Strategy == "" {
-		cfg.Router.Strategy = "round_robin"
+		cfg.Router.Strategy = StrategyRoundRobin
 	}
 	if cfg.Router.HeaderProviderKey == "" {
 		cfg.Router.HeaderProviderKey = "X-AI-Provider"
 	}
+
+	cfg.Router.Strategy = strings.ToLower(strings.TrimSpace(cfg.Router.Strategy))
 
 	for i := range cfg.Providers {
 		if cfg.Providers[i].Weight <= 0 {
@@ -167,11 +188,11 @@ func applyDefaults(cfg *Config) {
 		}
 		cfg.Providers[i].TargetAPI = strings.ToLower(strings.TrimSpace(cfg.Providers[i].TargetAPI))
 		if cfg.Providers[i].TargetAPI == "" {
-			cfg.Providers[i].TargetAPI = "claude"
+			cfg.Providers[i].TargetAPI = TargetAPIClaude
 		}
 		cfg.Providers[i].RequestTranslate = strings.ToLower(strings.TrimSpace(cfg.Providers[i].RequestTranslate))
 		if cfg.Providers[i].RequestTranslate == "" {
-			cfg.Providers[i].RequestTranslate = "none"
+			cfg.Providers[i].RequestTranslate = TranslateNone
 		}
 	}
 }
@@ -205,8 +226,7 @@ func validate(cfg Config) error {
 		return errors.New("no providers configured")
 	}
 
-	strategy := strings.ToLower(cfg.Router.Strategy)
-	if strategy != "round_robin" && strategy != "weighted_random" {
+	if cfg.Router.Strategy != StrategyRoundRobin && cfg.Router.Strategy != StrategyWeightedRandom {
 		return fmt.Errorf("unsupported router strategy %q", cfg.Router.Strategy)
 	}
 
@@ -225,16 +245,16 @@ func validate(cfg Config) error {
 			return fmt.Errorf("provider %q base_url cannot be empty", p.Name)
 		}
 		switch p.TargetAPI {
-		case "", "claude", "codex":
+		case TargetAPIClaude, TargetAPICodex:
 		default:
 			return fmt.Errorf("provider %q unsupported target_api %q", p.Name, p.TargetAPI)
 		}
 		switch p.RequestTranslate {
-		case "", "none", "claude_to_codex":
+		case TranslateNone, TranslateClaudeToCodex:
 		default:
 			return fmt.Errorf("provider %q unsupported request_translate %q", p.Name, p.RequestTranslate)
 		}
-		if p.RequestTranslate == "claude_to_codex" && p.TargetAPI != "codex" {
+		if p.RequestTranslate == TranslateClaudeToCodex && p.TargetAPI != TargetAPICodex {
 			return fmt.Errorf("provider %q request_translate=claude_to_codex requires target_api=codex", p.Name)
 		}
 		parsed, err := url.Parse(p.BaseURL)
@@ -277,4 +297,12 @@ func (p ProviderConfig) EnabledOrDefault() bool {
 		return true
 	}
 	return *p.Enabled
+}
+
+// ExposeProviderOrDefault returns true when expose_provider is enabled or omitted.
+func (s ServerConfig) ExposeProviderOrDefault() bool {
+	if s.ExposeProvider == nil {
+		return true
+	}
+	return *s.ExposeProvider
 }

@@ -7,8 +7,8 @@ import (
 var logsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "Show and follow log output",
-	Run: func(cmd *cobra.Command, args []string) {
-		showLogs()
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return showLogs()
 	},
 }
 

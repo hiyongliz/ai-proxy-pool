@@ -23,6 +23,12 @@ func (h *ReloadableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Reload atomically swaps in a new server configuration.
+// It closes idle connections on the old server to avoid leaking resources.
 func (h *ReloadableHandler) Reload(s *Server) {
-	h.current.Store(s)
+	old := h.current.Swap(s)
+	if old != nil {
+		for _, c := range old.clients {
+			c.CloseIdleConnections()
+		}
+	}
 }

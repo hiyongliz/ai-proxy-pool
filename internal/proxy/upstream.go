@@ -51,7 +51,7 @@ func (s *Server) buildUpstreamRequest(inReq *http.Request, body []byte, provider
 	outReq.Header.Del("Authorization")
 	outReq.Header.Del("X-Api-Key")
 
-	outReq.Host = mustHost(provider.BaseURL)
+	outReq.Host = hostFromURL(provider.BaseURL)
 	addForwardHeaders(outReq, inReq)
 	applyProviderAuth(outReq, provider)
 	applyProviderStaticHeaders(outReq, provider)
@@ -77,8 +77,8 @@ func buildUpstreamURL(provider config.ProviderConfig, inPath, rawQuery string) (
 	return base.String(), nil
 }
 
-// mustHost extracts the host from a URL string, returning empty string on error.
-func mustHost(rawURL string) string {
+// hostFromURL extracts the host from a URL string, returning empty string on error.
+func hostFromURL(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return ""

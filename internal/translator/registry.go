@@ -35,6 +35,9 @@ func Register(from, to string, fn RequestTranslator) {
 
 	regMu.Lock()
 	defer regMu.Unlock()
+	if _, exists := registry[key]; exists {
+		panic(fmt.Sprintf("translator already registered for %s→%s", key.from, key.to))
+	}
 	registry[key] = fn
 }
 

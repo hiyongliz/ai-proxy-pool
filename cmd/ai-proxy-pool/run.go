@@ -71,7 +71,9 @@ func (m *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (m *multiHandler) Handle(ctx context.Context, rec slog.Record) error {
-	_ = m.h1.Handle(ctx, rec)
+	if err := m.h1.Handle(ctx, rec); err != nil {
+		fmt.Fprintf(os.Stderr, "log file write failed: %v\n", err)
+	}
 	return m.h2.Handle(ctx, rec)
 }
 

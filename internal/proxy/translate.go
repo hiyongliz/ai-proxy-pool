@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
 	"github.com/hiyongliz/ai-proxy-pool/internal/translator"
@@ -12,15 +11,14 @@ import (
 )
 
 func translateRequestForProvider(provider config.ProviderConfig, body []byte, model, path string) ([]byte, string, string, error) {
-	mode := strings.ToLower(strings.TrimSpace(provider.RequestTranslate))
-	if mode == "" || mode == "none" {
+	if provider.RequestTranslate == "" || provider.RequestTranslate == config.TranslateNone {
 		return body, path, model, nil
 	}
 
 	stream := requestStreamOrDefault(body, false)
 
-	switch mode {
-	case "claude_to_codex":
+	switch provider.RequestTranslate {
+	case config.TranslateClaudeToCodex:
 		out, ok, err := translator.Translate(
 			translator.APIClaude,
 			translator.APICodex,
@@ -35,7 +33,7 @@ func translateRequestForProvider(provider config.ProviderConfig, body []byte, mo
 			return nil, "", "", err
 		}
 		if !ok {
-			return nil, "", "", fmt.Errorf("translator not registered for %s", mode)
+			return nil, "", "", fmt.Errorf("translator not registered for %s", provider.RequestTranslate)
 		}
 
 		nextBody := body
@@ -60,7 +58,7 @@ func translateRequestForProvider(provider config.ProviderConfig, body []byte, mo
 }
 
 func shouldTranslateResponse(provider config.ProviderConfig) bool {
-	return strings.EqualFold(strings.TrimSpace(provider.RequestTranslate), "claude_to_codex")
+	return provider.RequestTranslate == config.TranslateClaudeToCodex
 }
 
 func translateNonStreamResponseForProvider(provider config.ProviderConfig, originalRequestBody, raw []byte) ([]byte, error) {
@@ -68,8 +66,8 @@ func translateNonStreamResponseForProvider(provider config.ProviderConfig, origi
 		return raw, nil
 	}
 
-	switch strings.ToLower(strings.TrimSpace(provider.RequestTranslate)) {
-	case "claude_to_codex":
+	switch provider.RequestTranslate {
+	case config.TranslateClaudeToCodex:
 		return codexclaude.ConvertCodexResponseToClaudeNonStream(originalRequestBody, raw)
 	default:
 		return nil, fmt.Errorf("unsupported response translate mode %q", provider.RequestTranslate)
@@ -82,8 +80,8 @@ func translateStreamResponseForProvider(provider config.ProviderConfig, original
 		return n, err
 	}
 
-	switch strings.ToLower(strings.TrimSpace(provider.RequestTranslate)) {
-	case "claude_to_codex":
+	switch provider.RequestTranslate {
+	case config.TranslateClaudeToCodex:
 		return codexclaude.ConvertCodexResponseToClaudeStream(originalRequestBody, w, r)
 	default:
 		return 0, fmt.Errorf("unsupported response translate mode %q", provider.RequestTranslate)

@@ -39,7 +39,7 @@ func (g *GlobalStats) Persist() {
 		return
 	}
 
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		slog.Error("failed to write stats file", "path", path, "error", err)
 		return
 	}

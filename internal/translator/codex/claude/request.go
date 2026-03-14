@@ -338,7 +338,7 @@ func convertTools(root map[string]any, toolShortNameMap map[string]string) []any
 }
 
 func normalizeToolParameters(v any) map[string]any {
-	schema := asMap(v)
+	schema := asMapCopy(v)
 	if len(schema) == 0 {
 		return map[string]any{
 			"type":       "object",
@@ -466,12 +466,22 @@ func shortenToolNameToLimit(name string, limit int) string {
 	return name[:limit]
 }
 
+// asMap returns the map directly without copying. Safe for read-only access.
 func asMap(v any) map[string]any {
 	if v == nil {
 		return map[string]any{}
 	}
 	m, ok := v.(map[string]any)
 	if !ok {
+		return map[string]any{}
+	}
+	return m
+}
+
+// asMapCopy returns a shallow copy of the map. Use when the caller needs to mutate the result.
+func asMapCopy(v any) map[string]any {
+	m := asMap(v)
+	if len(m) == 0 {
 		return map[string]any{}
 	}
 	out := make(map[string]any, len(m))

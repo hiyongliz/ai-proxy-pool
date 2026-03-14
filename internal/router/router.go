@@ -11,9 +11,7 @@ import (
 	"time"
 
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
-)
-
-// SelectionInput describes the attributes used to select an upstream provider.
+)// SelectionInput describes the attributes used to select an upstream provider.
 type SelectionInput struct {
 	Path              string
 	Model             string
@@ -48,7 +46,7 @@ type compiledRule struct {
 // NewSelector builds a selector from config.
 func NewSelector(routerCfg config.RouterConfig, providers []config.ProviderConfig) (*Selector, error) {
 	s := &Selector{
-		strategy:         strings.ToLower(routerCfg.Strategy),
+		strategy:         routerCfg.Strategy,
 		defaultProvider:  routerCfg.DefaultProvider,
 		providers:        map[string]providerItem{},
 		allProviderNames: make([]string, 0, len(providers)),
@@ -112,7 +110,10 @@ func (s *Selector) Select(input SelectionInput) (config.ProviderConfig, error) {
 
 	if input.ForcedProvider != "" {
 		if item, ok := s.providers[input.ForcedProvider]; ok {
-			return item.cfg, nil
+			if _, isExcluded := excluded[input.ForcedProvider]; !isExcluded {
+				return item.cfg, nil
+			}
+			return config.ProviderConfig{}, fmt.Errorf("forced provider %q is excluded", input.ForcedProvider)
 		}
 		return config.ProviderConfig{}, fmt.Errorf("forced provider %q is not available", input.ForcedProvider)
 	}
@@ -209,7 +210,7 @@ func (s *Selector) pick(candidates []string) (config.ProviderConfig, error) {
 	}
 
 	switch s.strategy {
-	case "weighted_random":
+	case config.StrategyWeightedRandom:
 		return s.pickWeightedRandom(candidates)
 	default:
 		return s.pickRoundRobin(candidates), nil

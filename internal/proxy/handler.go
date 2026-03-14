@@ -21,18 +21,27 @@ import (
 	"github.com/hiyongliz/ai-proxy-pool/internal/router"
 )
 
+const (
+	defaultMaxRequestBodyBytes = 8 * 1024 * 1024
+	defaultUpstreamTimeout     = 300 * time.Second
+	circuitBreakerThreshold    = 3
+	circuitBreakerDurationSec  = 120
+	tokenEstimateDivisor       = 4
+)
+
 // Server is an HTTP proxy that routes requests to configured providers.
 type Server struct {
 	cfg      config.Config
 	selector *router.Selector
 	clients  map[string]*http.Client
+	stats    *GlobalStats
 	handler  http.Handler
 }
 
 // NewServer creates a proxy server from configuration.
 func NewServer(cfg config.Config) (*Server, error) {
 	if cfg.Server.MaxRequestBodyBytes <= 0 {
-		cfg.Server.MaxRequestBodyBytes = 8 * 1024 * 1024
+		cfg.Server.MaxRequestBodyBytes = defaultMaxRequestBodyBytes
 	}
 
 	selector, err := router.NewSelector(cfg.Router, cfg.Providers)
@@ -50,10 +59,15 @@ func NewServer(cfg config.Config) (*Server, error) {
 			timeout = cfg.Server.UpstreamTimeout
 		}
 		if timeout == 0 {
-			timeout = 300 * time.Second
+			timeout = defaultUpstreamTimeout
 		}
 		clients[provider.Name] = &http.Client{
 			Timeout: timeout,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 20,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		}
 	}
 
@@ -61,6 +75,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 		cfg:      cfg,
 		selector: selector,
 		clients:  clients,
+		stats:    defaultStats,
 	}
 	server.handler = server.buildHandler()
 	return server, nil
@@ -125,7 +140,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// 第一阶段：筛选目前正在全局熔断期的 Provider，直接将其强行计入 `excludedProviders`
 	for _, p := range s.cfg.Providers {
-		if stat := defaultStats.GetOrCreate(p.Name); stat != nil {
+		if stat := s.stats.GetOrCreate(p.Name); stat != nil {
 			openUntil := atomic.LoadInt64(&stat.CircuitOpenUntil)
 			if openUntil > 0 && time.Now().Unix() < openUntil {
 				excludedProviders = append(excludedProviders, p.Name)
@@ -151,7 +166,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		pStats := defaultStats.GetOrCreate(selected.Name)
+		pStats := s.stats.GetOrCreate(selected.Name)
 		atomic.AddInt64(&pStats.ActiveConnections, 1)
 
 		statusCode, upstreamErr := s.doUpstreamRequest(w, r, body, model, selected, attempt, maxAttempts)
@@ -187,10 +202,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// 判断连贯失误是否触及致命级熔断
 		if isProviderFatalError(statusCode, upstreamErr) {
 			fails := atomic.AddInt32(&pStats.ConsecutiveErrors, 1)
-			if fails >= 3 {
-				// 触发熔断：隔离 120 秒
-				atomic.StoreInt64(&pStats.CircuitOpenUntil, time.Now().Unix()+120)
-				slog.Warn("provider circuit breaker triggered", "provider", selected.Name, "duration", "120s")
+			if fails >= circuitBreakerThreshold {
+				// 触发熔断：隔离
+				atomic.StoreInt64(&pStats.CircuitOpenUntil, time.Now().Unix()+circuitBreakerDurationSec)
+				slog.Warn("provider circuit breaker triggered", "provider", selected.Name, "duration_sec", circuitBreakerDurationSec)
 			}
 		} else {
 			// 非致命错误（比如 400 Bad Request），以及成功的 2xx/3xx，清零错误池
@@ -231,7 +246,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 // doUpstreamRequest 执行上游请求，返回 (HTTP状态码, 错误)。
 // 如果成功写入响应，错误为 nil；否则返回错误供重试决策。
 func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body []byte, model string, selected config.ProviderConfig, attempt, maxAttempts int) (int, error) {
-	pStats := defaultStats.GetOrCreate(selected.Name)
+	pStats := s.stats.GetOrCreate(selected.Name)
 
 	// 模型映射
 	upstreamModel := model
@@ -265,7 +280,7 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 
 	// 简单解析请求体算一下 Input Token 估值 (按经验 1 token = 4 字节的粗略估算，如果 JSON 里有明确的 tokens 可提取更准)
 	if len(body) > 0 {
-		atomic.AddInt64(&pStats.PromptTokens, int64(len(body)/4))
+		atomic.AddInt64(&pStats.PromptTokens, int64(len(body)/tokenEstimateDivisor))
 	}
 
 	client, ok := s.clients[selected.Name]
@@ -321,7 +336,9 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 		}
 
 		copyResponseHeaders(w.Header(), resp.Header)
-		w.Header().Set("X-Selected-Provider", selected.Name)
+		if s.cfg.Server.ExposeProviderOrDefault() {
+			w.Header().Set("X-Selected-Provider", selected.Name)
+		}
 		w.Header().Del("Content-Length")
 
 		var written int64
@@ -355,23 +372,14 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 			return resp.StatusCode, responseWriteError{err: err}
 		}
 
-		atomic.AddInt64(&pStats.TotalBytes, written)
-		if written > 0 {
-			atomic.AddInt64(&pStats.CompletionTokens, written/4)
-		}
-
-		slog.Info("upstream response",
-			"provider", selected.Name,
-			"status", resp.StatusCode,
-			"duration_ms", time.Since(upstreamStart).Milliseconds(),
-			"response_bytes", written,
-			"attempt", attempt,
-		)
+		s.recordUpstreamResponse(pStats, selected.Name, resp.StatusCode, upstreamStart, written, attempt)
 		return resp.StatusCode, nil
 	}
 
 	copyResponseHeaders(w.Header(), resp.Header)
-	w.Header().Set("X-Selected-Provider", selected.Name)
+	if s.cfg.Server.ExposeProviderOrDefault() {
+		w.Header().Set("X-Selected-Provider", selected.Name)
+	}
 	w.WriteHeader(resp.StatusCode)
 	written, err := io.Copy(w, resp.Body)
 	if err != nil {
@@ -384,20 +392,25 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 		return resp.StatusCode, responseWriteError{err: err}
 	}
 
+	s.recordUpstreamResponse(pStats, selected.Name, resp.StatusCode, upstreamStart, written, attempt)
+
+	return resp.StatusCode, nil
+}
+
+// recordUpstreamResponse updates stats and logs the upstream response.
+func (s *Server) recordUpstreamResponse(pStats *ProviderStats, providerName string, statusCode int, start time.Time, written int64, attempt int) {
 	atomic.AddInt64(&pStats.TotalBytes, written)
 	if written > 0 {
-		atomic.AddInt64(&pStats.CompletionTokens, written/4)
+		atomic.AddInt64(&pStats.CompletionTokens, written/tokenEstimateDivisor)
 	}
 
 	slog.Info("upstream response",
-		"provider", selected.Name,
-		"status", resp.StatusCode,
-		"duration_ms", time.Since(upstreamStart).Milliseconds(),
+		"provider", providerName,
+		"status", statusCode,
+		"duration_ms", time.Since(start).Milliseconds(),
 		"response_bytes", written,
 		"attempt", attempt,
 	)
-
-	return resp.StatusCode, nil
 }
 
 type responseWriteError struct {
@@ -431,7 +444,9 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload map[string]string)
 	w.WriteHeader(statusCode)
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
-	_ = encoder.Encode(payload)
+	if err := encoder.Encode(payload); err != nil {
+		slog.Error("writeJSON encode failed", "error", err)
+	}
 }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
