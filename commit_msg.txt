@@ -1,7 +1,0 @@
-feat: enhance TUI configuration and improve codex to claude translation
-
-- Extract TUI configuration logic into `configs_tui.go` and `configs_ops.go` for better modularity.
-- Add `log_colorize.go` for colored log output in the terminal.
-- Major rewrite of `codex/claude/response.go` to handle complex multi-turn and tool-use response parsing.
-- Refactor `proxy/handler.go` and `daemon.go` to support new logging and configuration flows.
-- Update `Go` module dependencies in `Makefile`.
