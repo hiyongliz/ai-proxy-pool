@@ -331,6 +331,9 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 
 	if shouldTranslateResponse(selected) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		isStream := requestStreamOrDefault(body, false)
+		if r.URL.Path == "/v1/messages/count_tokens" {
+			isStream = false
+		}
 		if contentType := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(contentType, "text/event-stream") {
 			isStream = true
 		}
@@ -351,7 +354,7 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 			if readErr != nil {
 				return resp.StatusCode, fmt.Errorf("read upstream body: %w", readErr)
 			}
-			translatedBody, translateErr := translateNonStreamResponseForProvider(selected, body, rawBody)
+			translatedBody, translateErr := translateNonStreamResponseForProvider(selected, r.URL.Path, body, rawBody)
 			if translateErr != nil {
 				return resp.StatusCode, fmt.Errorf("translate upstream response: %w", translateErr)
 			}
