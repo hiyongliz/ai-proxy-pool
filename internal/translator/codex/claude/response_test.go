@@ -387,3 +387,111 @@ func TestConvertCodexResponseToClaudeStreamPreserveToolArgumentsSpaces(t *testin
 		t.Fatalf("tool arguments should not collapse spaces, got=%s", got)
 	}
 }
+
+func TestStripANSI(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"bare ESC pair", "cd /path\x1b\x1b", "cd /path"},
+		{"single ESC", "hello\x1bworld", "helloworld"},
+		{"CSI color", "\x1b[32mgreen\x1b[0m", "green"},
+		{"CSI bold", "\x1b[1mbold\x1b[22m", "bold"},
+		{"mixed CSI and bare ESC", "\x1b[31mred\x1b[0m\x1b", "red"},
+		{"no escape", "clean string", "clean string"},
+		{"empty", "", ""},
+		{"only ESC", "\x1b\x1b\x1b", ""},
+		{"json with ESC", "{\"cmd\":\"cd /dir\x1b\x1b\"}", `{"cmd":"cd /dir"}`},
+		{"OSC sequence", "\x1b]0;title\x07text", "text"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := stripANSI(tt.input); got != tt.want {
+				t.Errorf("stripANSI(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaudeStreamStripsANSIFromToolArgs(t *testing.T) {
+	t.Parallel()
+
+	originalReq := []byte(`{
+		"model":"claude-4-sonnet",
+		"tools":[{"name":"Bash"}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"run cd"}]}]
+	}`)
+
+	in := strings.Join([]string{
+		`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_1","name":"Bash"}}`,
+		"",
+		`data: {"type":"response.function_call_arguments.delta","delta":"{\"command\":\"cd /path/to/dir"}`,
+		"",
+		`data: {"type":"response.function_call_arguments.delta","delta":"\"\u001b\u001b}"}`,
+		"",
+		`data: {"type":"response.output_item.done","item":{"type":"function_call"}}`,
+		"",
+	}, "\n")
+
+	var out bytes.Buffer
+	if _, err := ConvertCodexResponseToClaudeStream(originalReq, &out, strings.NewReader(in)); err != nil {
+		t.Fatalf("convert stream: %v", err)
+	}
+	got := out.String()
+	if strings.Contains(got, `\u001b`) {
+		t.Fatalf("stream output should strip ANSI from tool args, got=%s", got)
+	}
+	if !strings.Contains(got, `"partial_json"`) {
+		t.Fatalf("stream should contain partial_json deltas, got=%s", got)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStreamStripsANSIFromToolArgs(t *testing.T) {
+	t.Parallel()
+
+	originalReq := []byte(`{
+		"tools":[{"name":"Bash"}]
+	}`)
+
+	raw := []byte(`{
+		"id":"resp_1",
+		"type":"response",
+		"model":"gpt-5-codex",
+		"stop_reason":"stop",
+		"usage":{"input_tokens":10,"output_tokens":4},
+		"output":[
+			{"type":"function_call","call_id":"call_1","name":"Bash","arguments":"{\"command\":\"cd /path/to/dir\u001b\u001b\"}"}
+		]
+	}`)
+
+	out, err := ConvertCodexResponseToClaudeNonStream(originalReq, raw)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	content := payload["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("unexpected content length: %d", len(content))
+	}
+	toolUse := content[0].(map[string]any)
+	input := toolUse["input"].(map[string]any)
+	cmd, ok := input["command"].(string)
+	if !ok {
+		t.Fatalf("command should be a string, got=%#v", input["command"])
+	}
+	if strings.Contains(cmd, "\x1b") {
+		t.Fatalf("command should not contain ESC chars, got=%q", cmd)
+	}
+	if cmd != "cd /path/to/dir" {
+		t.Fatalf("command should be clean path, got=%q", cmd)
+	}
+}

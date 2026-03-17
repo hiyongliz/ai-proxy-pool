@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -135,7 +136,7 @@ func ConvertCodexResponseToClaudeNonStream(originalRequestRaw []byte, raw []byte
 				"name":  name,
 				"input": map[string]any{},
 			}
-			if args := asString(item["arguments"]); args != "" {
+			if args := stripANSI(asString(item["arguments"])); args != "" {
 				var obj map[string]any
 				if json.Unmarshal([]byte(args), &obj) == nil && len(obj) > 0 {
 					toolBlock["input"] = obj
@@ -476,7 +477,7 @@ func handleFunctionCallArgsDelta(root map[string]any, state *streamState) (strin
 		"index": state.blockIndex,
 		"delta": map[string]any{
 			"type":         "input_json_delta",
-			"partial_json": asRawString(root["delta"]),
+			"partial_json": stripANSI(asRawString(root["delta"])),
 		},
 	}
 	return sse("content_block_delta", payload)
@@ -486,7 +487,7 @@ func handleFunctionCallArgsDone(root map[string]any, state *streamState) (string
 	if state.hasReceivedArgumentsDelta {
 		return "", nil
 	}
-	args := asRawString(root["arguments"])
+	args := stripANSI(asRawString(root["arguments"]))
 	if args == "" {
 		return "", nil
 	}
@@ -675,4 +676,15 @@ func isCodexDecorationLine(line string) bool {
 		return true
 	}
 	return false
+}
+
+// ansiPattern matches ANSI escape sequences:
+//   - CSI sequences: ESC [ ... final_byte
+//   - OSC sequences: ESC ] ... ST
+//   - Bare ESC characters (0x1B)
+var ansiPattern = regexp.MustCompile(`\x1b(?:\[[0-9;]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\))|\x1b`)
+
+// stripANSI removes ANSI escape sequences and bare ESC characters from s.
+func stripANSI(s string) string {
+	return ansiPattern.ReplaceAllString(s, "")
 }
