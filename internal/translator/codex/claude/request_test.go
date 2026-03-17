@@ -276,6 +276,36 @@ func TestConvertClaudeRequestToCodexFunctionCallArgumentsAreJSONString(t *testin
 	}
 }
 
+func TestConvertClaudeRequestToCodexDefaultReasoningSummaryOmitted(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"model":"claude-4-sonnet",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`)
+
+	out, err := ConvertClaudeRequestToCodex(translator.TranslateRequest{
+		Path: "/v1/messages",
+		Body: raw,
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(out.Body, &payload); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+
+	reasoning, ok := payload["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing reasoning: %#v", payload["reasoning"])
+	}
+	if _, ok := reasoning["summary"]; ok {
+		t.Fatalf("expected reasoning.summary to be omitted")
+	}
+}
+
 func TestConvertClaudeRequestToCodexNoThinkingDisablesReasoningSummary(t *testing.T) {
 	t.Parallel()
 
@@ -301,7 +331,7 @@ func TestConvertClaudeRequestToCodexNoThinkingDisablesReasoningSummary(t *testin
 	if !ok {
 		t.Fatalf("missing reasoning: %#v", payload["reasoning"])
 	}
-	if reasoning["summary"] != "none" {
+	if _, ok := reasoning["summary"]; ok {
 		t.Fatalf("unexpected reasoning summary: %#v", reasoning["summary"])
 	}
 	if reasoning["effort"] != "minimal" {
