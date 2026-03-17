@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -895,5 +897,95 @@ func TestClaudeToCodexTranslateFailureReturnsBadGateway(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "upstream request failed") {
 		t.Fatalf("expected upstream failure message, got %s", rr.Body.String())
+	}
+}
+
+func TestUpstreamNon2xxLogsRequestAndResponse(t *testing.T) {
+	var logged strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	old := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(old)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"bad"}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	body := `{"model":"test","input":"hello"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "bad") {
+		t.Fatalf("expected upstream body passthrough, got=%s", rr.Body.String())
+	}
+
+	logs := logged.String()
+	if !strings.Contains(logs, "upstream non-2xx response") {
+		t.Fatalf("expected log marker, got=%s", logs)
+	}
+	if !strings.Contains(logs, strconv.Quote(body)) {
+		t.Fatalf("expected request body in logs, got=%s", logs)
+	}
+	if !strings.Contains(logs, strconv.Quote(`{"error":"bad"}`)) {
+		t.Fatalf("expected response body in logs, got=%s", logs)
+	}
+}
+
+func TestUpstreamNon2xxStreamLogsWithoutReadingBody(t *testing.T) {
+	var logged strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	old := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(old)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, "data: partial")
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	body := `{"model":"test","stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	logs := logged.String()
+	if !strings.Contains(logs, "upstream non-2xx response") {
+		t.Fatalf("expected log marker, got=%s", logs)
+	}
+	if strings.Contains(logs, "response_body") {
+		t.Fatalf("did not expect response_body logged for stream, got=%s", logs)
 	}
 }
