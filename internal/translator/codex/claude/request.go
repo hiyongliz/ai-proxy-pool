@@ -39,8 +39,7 @@ func ConvertClaudeRequestToCodex(req translator.TranslateRequest) (translator.Tr
 		"input":               []any{},
 		"parallel_tool_calls": true,
 		"reasoning": map[string]any{
-			"effort":  "minimal",
-			"summary": "none",
+			"effort": "minimal",
 		},
 		"stream": stream,
 		"store":  false,
