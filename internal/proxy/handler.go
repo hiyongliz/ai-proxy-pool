@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -321,6 +322,57 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 	statusStr := strconv.Itoa(resp.StatusCode)
 	metrics.ProviderRequestsTotal.WithLabelValues(selected.Name, statusStr, modelLabel).Inc()
 	metrics.ProviderRequestDuration.WithLabelValues(selected.Name, modelLabel).Observe(time.Since(upstreamStart).Seconds())
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		isStream := requestStreamOrDefault(body, false)
+		if r.URL.Path == "/v1/messages/count_tokens" {
+			isStream = false
+		}
+		if contentType := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(contentType, "text/event-stream") {
+			isStream = true
+		}
+
+		if !isStream {
+			rawBody, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				slog.Warn("upstream non-2xx response",
+					"provider", selected.Name,
+					"status", resp.StatusCode,
+					"method", upstreamReq.Method,
+					"upstream_host", upstreamReq.URL.Host,
+					"upstream_path", upstreamReq.URL.Path,
+					"attempt", attempt,
+					"max_attempts", maxAttempts,
+					"request_body", string(body),
+					"read_error", readErr,
+				)
+				return resp.StatusCode, fmt.Errorf("read upstream body: %w", readErr)
+			}
+			slog.Warn("upstream non-2xx response",
+				"provider", selected.Name,
+				"status", resp.StatusCode,
+				"method", upstreamReq.Method,
+				"upstream_host", upstreamReq.URL.Host,
+				"upstream_path", upstreamReq.URL.Path,
+				"attempt", attempt,
+				"max_attempts", maxAttempts,
+				"request_body", string(body),
+				"response_body", string(rawBody),
+			)
+			resp.Body = io.NopCloser(bytes.NewReader(rawBody))
+		} else {
+			slog.Warn("upstream non-2xx response",
+				"provider", selected.Name,
+				"status", resp.StatusCode,
+				"method", upstreamReq.Method,
+				"upstream_host", upstreamReq.URL.Host,
+				"upstream_path", upstreamReq.URL.Path,
+				"attempt", attempt,
+				"max_attempts", maxAttempts,
+				"request_body", string(body),
+			)
+		}
+	}
 
 	// 如果是 5xx 且需要重试，不写响应直接返回错误
 	if resp.StatusCode >= 500 && attempt < maxAttempts && s.cfg.Server.Retry.RetryOn5xxOrDefault() {
