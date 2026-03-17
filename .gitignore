@@ -28,6 +28,7 @@ config.yaml
 
 # Claude Code
 .claude/settings.local.json
+.worktrees/
 
 # OS
 .DS_Store
