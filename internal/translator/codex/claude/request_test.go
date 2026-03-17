@@ -50,6 +50,61 @@ func TestConvertClaudeRequestToCodexBasic(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodexCountTokensForcesZeroOutput(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{
+		"model":"claude-4-sonnet",
+		"stream":true,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`)
+
+	out, err := ConvertClaudeRequestToCodex(translator.TranslateRequest{
+		Model:  "claude-4-sonnet",
+		Path:   "/v1/messages/count_tokens",
+		Body:   raw,
+		Stream: true,
+	})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	if out.Path != "/v1/responses" {
+		t.Fatalf("unexpected path: %q", out.Path)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(out.Body, &payload); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if payload["stream"] != false {
+		t.Fatalf("unexpected stream: %#v", payload["stream"])
+	}
+	maxTokens, ok := payload["max_output_tokens"]
+	if !ok {
+		t.Fatalf("missing max_output_tokens: %#v", payload)
+	}
+	if got := asTestInt64(maxTokens); got != 0 {
+		t.Fatalf("unexpected max_output_tokens: %d", got)
+	}
+}
+
+func asTestInt64(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case json.Number:
+		val, _ := n.Int64()
+		return val
+	default:
+		return -1
+	}
+}
+
+
 func TestConvertClaudeRequestToCodexTools(t *testing.T) {
 	t.Parallel()
 

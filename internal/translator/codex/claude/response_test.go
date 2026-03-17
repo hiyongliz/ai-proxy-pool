@@ -62,6 +62,46 @@ func TestConvertCodexResponseToClaudeNonStream(t *testing.T) {
 	}
 }
 
+func TestConvertCodexCountTokensResponse(t *testing.T) {
+	t.Parallel()
+
+	originalReq := []byte(`{
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]
+	}`)
+
+	raw := []byte(`{
+		"id":"resp_1",
+		"type":"response",
+		"model":"gpt-5-codex",
+		"usage":{"input_tokens":12,"output_tokens":0},
+		"output":[]
+	}`)
+
+	out, err := ConvertCodexCountTokensToClaude(originalReq, raw)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+
+	if payload["input_tokens"] != float64(12) {
+		t.Fatalf("unexpected input_tokens: %#v", payload["input_tokens"])
+	}
+}
+
+func TestConvertCodexCountTokensResponseMissingUsage(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{"type":"response","output":[]}`)
+
+	if _, err := ConvertCodexCountTokensToClaude(nil, raw); err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
 func TestConvertCodexResponseToClaudeStream(t *testing.T) {
 	t.Parallel()
 

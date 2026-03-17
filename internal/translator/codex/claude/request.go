@@ -29,6 +29,9 @@ func ConvertClaudeRequestToCodex(req translator.TranslateRequest) (translator.Tr
 	if v, ok := root["stream"].(bool); ok {
 		stream = v
 	}
+	if req.Path == "/v1/messages/count_tokens" {
+		stream = false
+	}
 
 	out := map[string]any{
 		"model":               model,
@@ -59,6 +62,9 @@ func ConvertClaudeRequestToCodex(req translator.TranslateRequest) (translator.Tr
 	if tools := convertTools(root, toolShortNameMap); len(tools) > 0 {
 		out["tools"] = tools
 		out["tool_choice"] = "auto"
+	}
+	if req.Path == "/v1/messages/count_tokens" {
+		out["max_output_tokens"] = 0
 	}
 
 	body, err := json.Marshal(out)

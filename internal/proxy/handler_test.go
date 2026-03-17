@@ -31,6 +31,22 @@ func TestProxyRouting(t *testing.T) {
 	}))
 	defer upstreamB.Close()
 
+	upstreamCodex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "unexpected path"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":    "resp_1",
+			"type":  "response",
+			"model": "gpt-5-codex",
+			"usage": map[string]any{"input_tokens": 42, "output_tokens": 0},
+			"output": []any{},
+		})
+	}))
+	defer upstreamCodex.Close()
+
 	cfg := config.Config{
 		Server: config.ServerConfig{
 			UpstreamTimeout: 30 * time.Second,
@@ -55,6 +71,11 @@ func TestProxyRouting(t *testing.T) {
 			{
 				Name:    "b",
 				BaseURL: upstreamB.URL,
+			},
+			{
+				Name:             "codex",
+				BaseURL:          upstreamCodex.URL,
+				RequestTranslate: config.TranslateClaudeToCodex,
 			},
 		},
 	}
@@ -100,6 +121,33 @@ func TestProxyRouting(t *testing.T) {
 		body, _ := io.ReadAll(rr.Body)
 		if !bytes.Contains(body, []byte(`"provider":"b"`)) {
 			t.Fatalf("unexpected upstream response %s", string(body))
+		}
+	})
+
+	t.Run("translate count_tokens", func(t *testing.T) {
+		body := []byte(`{
+			"model":"claude-4-sonnet",
+			"stream":true,
+			"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+		}`)
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-AI-Provider", "codex")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		}
+		if rr.Header().Get("X-Selected-Provider") != "codex" {
+			t.Fatalf("unexpected selected provider %q", rr.Header().Get("X-Selected-Provider"))
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if payload["input_tokens"] != float64(42) {
+			t.Fatalf("unexpected input_tokens: %#v", payload["input_tokens"])
 		}
 	})
 }

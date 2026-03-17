@@ -167,6 +167,38 @@ func ConvertCodexResponseToClaudeNonStream(originalRequestRaw []byte, raw []byte
 	return encoded, nil
 }
 
+// ConvertCodexCountTokensToClaude converts a Codex response to Claude count_tokens output.
+func ConvertCodexCountTokensToClaude(_ []byte, raw []byte) ([]byte, error) {
+	root, err := decodeObject(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode codex response: %w", err)
+	}
+	response := root
+	if asString(root["type"]) == "response.completed" {
+		if resp := asMap(root["response"]); len(resp) > 0 {
+			response = resp
+		}
+	}
+	usage := asMap(response["usage"])
+	if len(usage) == 0 {
+		return nil, fmt.Errorf("missing usage")
+	}
+	inputTokens := asInt64(usage["input_tokens"])
+	if inputTokens == 0 {
+		if _, ok := usage["input_tokens"]; !ok {
+			return nil, fmt.Errorf("missing usage.input_tokens")
+		}
+	}
+	out := map[string]any{
+		"input_tokens": inputTokens,
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("encode claude count_tokens response: %w", err)
+	}
+	return encoded, nil
+}
+
 // ConvertCodexResponseToClaudeStream converts Codex SSE stream to Claude SSE stream.
 func ConvertCodexResponseToClaudeStream(originalRequestRaw []byte, w io.Writer, r io.Reader) (int64, error) {
 	var total int64

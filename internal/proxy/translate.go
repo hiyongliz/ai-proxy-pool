@@ -61,13 +61,16 @@ func shouldTranslateResponse(provider config.ProviderConfig) bool {
 	return provider.RequestTranslate == config.TranslateClaudeToCodex
 }
 
-func translateNonStreamResponseForProvider(provider config.ProviderConfig, originalRequestBody, raw []byte) ([]byte, error) {
+func translateNonStreamResponseForProvider(provider config.ProviderConfig, originalPath string, originalRequestBody, raw []byte) ([]byte, error) {
 	if !shouldTranslateResponse(provider) {
 		return raw, nil
 	}
 
 	switch provider.RequestTranslate {
 	case config.TranslateClaudeToCodex:
+		if originalPath == "/v1/messages/count_tokens" {
+			return codexclaude.ConvertCodexCountTokensToClaude(originalRequestBody, raw)
+		}
 		return codexclaude.ConvertCodexResponseToClaudeNonStream(originalRequestBody, raw)
 	default:
 		return nil, fmt.Errorf("unsupported response translate mode %q", provider.RequestTranslate)
@@ -107,3 +110,4 @@ func requestStreamOrDefault(body []byte, def bool) bool {
 	}
 	return b
 }
+
