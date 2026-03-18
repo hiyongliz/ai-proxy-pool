@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -739,6 +738,68 @@ func TestClaudeToCodexRequestTranslate(t *testing.T) {
 	}
 }
 
+func TestClaudeToCodexTranslatedResponseRemovesContentEncoding(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "zstd")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "resp_1",
+			"type":        "response",
+			"model":       "gpt-5-codex",
+			"stop_reason": "stop",
+			"usage": map[string]any{
+				"input_tokens":  10,
+				"output_tokens": 4,
+			},
+			"output": []any{
+				map[string]any{
+					"type": "message",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": "hello"},
+					},
+				},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "codex-1"},
+		Providers: []config.ProviderConfig{{
+			Name:             "codex-1",
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":false,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected translated response to remove Content-Encoding, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("expected application/json content type, got %q", got)
+	}
+}
+
 func TestClaudeToCodexResponseTranslateStream(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -796,7 +857,10 @@ func TestClaudeToCodexResponseTranslateStream(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	if got := rr.Header().Get("Content-Encoding"); got != "" {
-		t.Fatalf("expected translated stream response to drop Content-Encoding, got %q", got)
+		t.Fatalf("expected translated stream response to remove Content-Encoding, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
+		t.Fatalf("expected text/event-stream content type, got %q", got)
 	}
 	body := rr.Body.String()
 	for _, want := range []string{
@@ -813,48 +877,26 @@ func TestClaudeToCodexResponseTranslateStream(t *testing.T) {
 	}
 }
 
-func TestClaudeToCodexResponseTranslateNonStreamDropsContentEncoding(t *testing.T) {
+func TestClaudeToCodexNoContentSkipsBodyTranslation(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Encoding", "zstd")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":          "resp_1",
-			"type":        "response",
-			"model":       "gpt-5-codex",
-			"stop_reason": "stop",
-			"usage": map[string]any{
-				"input_tokens":  10,
-				"output_tokens": 4,
-			},
-			"output": []any{
-				map[string]any{
-					"type": "message",
-					"content": []any{
-						map[string]any{"type": "output_text", "text": "hello"},
-					},
-				},
-			},
-		})
+		w.Header().Set("Content-Length", "2")
+		w.WriteHeader(http.StatusNoContent)
+		_, _ = w.Write([]byte("{}"))
 	}))
 	defer upstream.Close()
 
 	cfg := config.Config{
-		Server: config.ServerConfig{
-			UpstreamTimeout: 30 * time.Second,
-		},
-		Router: config.RouterConfig{
-			Strategy:        "round_robin",
-			DefaultProvider: "codex-1",
-		},
-		Providers: []config.ProviderConfig{
-			{
-				Name:             "codex-1",
-				BaseURL:          upstream.URL,
-				TargetAPI:        "codex",
-				RequestTranslate: "claude_to_codex",
-				AuthType:         "none",
-			},
-		},
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "codex-1"},
+		Providers: []config.ProviderConfig{{
+			Name:             "codex-1",
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
 	}
 
 	server, err := NewServer(cfg)
@@ -871,11 +913,120 @@ func TestClaudeToCodexResponseTranslateNonStreamDropsContentEncoding(t *testing.
 	rr := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rr, req)
 
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.Len() != 0 {
+		t.Fatalf("expected empty body for 204 response, got %q", rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected 204 translated response to remove Content-Encoding, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("expected 204 translated response to remove Content-Length, got %q", got)
+	}
+}
+
+func TestClaudeToCodexNotModifiedSkipsBodyTranslation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "zstd")
+		w.Header().Set("Content-Length", "2")
+		w.WriteHeader(http.StatusNotModified)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "codex-1"},
+		Providers: []config.ProviderConfig{{
+			Name:             "codex-1",
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":false,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotModified {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.Len() != 0 {
+		t.Fatalf("expected empty body for 304 response, got %q", rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected 304 translated response to remove Content-Encoding, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("expected 304 translated response to remove Content-Length, got %q", got)
+	}
+}
+
+func TestClaudeToCodexHeadResponseSkipsBodyTranslation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Fatalf("expected HEAD request, got %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "zstd")
+		w.Header().Set("Content-Length", "2")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "codex-1"},
+		Providers: []config.ProviderConfig{{
+			Name:             "codex-1",
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodHead, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":false,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	if rr.Body.Len() != 0 {
+		t.Fatalf("expected empty body for HEAD response, got %q", rr.Body.String())
+	}
 	if got := rr.Header().Get("Content-Encoding"); got != "" {
-		t.Fatalf("expected translated non-stream response to drop Content-Encoding, got %q", got)
+		t.Fatalf("expected HEAD translated response to remove Content-Encoding, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("expected HEAD translated response to remove Content-Length, got %q", got)
 	}
 }
 
@@ -970,6 +1121,163 @@ func TestClaudeToCodexTranslateFailureReturnsBadGateway(t *testing.T) {
 	}
 }
 
+func TestNonTranslatedResponseReadFailureReturnsBadGateway(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("response writer does not support hijacking")
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		defer conn.Close()
+
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\n")
+		_, _ = buf.WriteString("Content-Type: application/json\r\n")
+		_, _ = buf.WriteString("Content-Length: 20\r\n")
+		_, _ = buf.WriteString("\r\n")
+		_, _ = buf.WriteString(`{"partial":true}`)
+		_ = buf.Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), `{"partial":true}`) {
+		t.Fatalf("expected truncated upstream body not to be passed through, got=%s", rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "upstream request failed") {
+		t.Fatalf("expected upstream failure message, got=%s", rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("expected local 502 json content type, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("expected 502 to remove upstream Content-Length, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected 502 to remove upstream Content-Encoding, got %q", got)
+	}
+}
+
+func TestNonTranslatedResponsePassthroughAfterSuccessfulRead(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Upstream", "ok")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != `{"ok":true}` {
+		t.Fatalf("expected passthrough body, got=%s", rr.Body.String())
+	}
+	if got := rr.Header().Get("X-Upstream"); got != "ok" {
+		t.Fatalf("expected passthrough header, got %q", got)
+	}
+}
+
+func TestTranslatedResponseLogsMinimalHeaders(t *testing.T) {
+	var logged strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	old := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(old)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "zstd")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "resp_1",
+			"type":        "response",
+			"model":       "gpt-5-codex",
+			"stop_reason": "stop",
+			"usage": map[string]any{
+				"input_tokens":  1,
+				"output_tokens": 1,
+			},
+			"output": []any{
+				map[string]any{
+					"type": "message",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": "ok"},
+					},
+				},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "codex-1"},
+		Providers: []config.ProviderConfig{{
+			Name:             "codex-1",
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"gpt-5-codex","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip, zstd")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	logs := logged.String()
+	if !strings.Contains(logs, "response_header_summary") {
+		t.Fatalf("expected response header summary log, got=%s", logs)
+	}
+	for _, want := range []string{"request_accept_encoding", "upstream_content_encoding", "upstream_content_type", "upstream_transfer_encoding", "upstream_content_length", "out_content_encoding", "out_content_type", "out_transfer_encoding", "out_content_length"} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("expected %s in logs, got=%s", want, logs)
+		}
+	}
+}
+
 func TestUpstreamNon2xxLogsRequestAndResponse(t *testing.T) {
 	var logged strings.Builder
 	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -998,6 +1306,7 @@ func TestUpstreamNon2xxLogsRequestAndResponse(t *testing.T) {
 	body := `{"model":"test","input":"hello"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip, zstd")
 	rr := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rr, req)
 
@@ -1012,11 +1321,108 @@ func TestUpstreamNon2xxLogsRequestAndResponse(t *testing.T) {
 	if !strings.Contains(logs, "upstream non-2xx response") {
 		t.Fatalf("expected log marker, got=%s", logs)
 	}
-	if !strings.Contains(logs, strconv.Quote(body)) {
-		t.Fatalf("expected request body in logs, got=%s", logs)
+	if strings.Contains(logs, body) {
+		t.Fatalf("did not expect request body in logs, got=%s", logs)
 	}
-	if !strings.Contains(logs, strconv.Quote(`{"error":"bad"}`)) {
-		t.Fatalf("expected response body in logs, got=%s", logs)
+	if strings.Contains(logs, `{"error":"bad"}`) {
+		t.Fatalf("did not expect response body in logs, got=%s", logs)
+	}
+	for _, want := range []string{"request_accept_encoding", "upstream_content_encoding", "upstream_content_type", "upstream_transfer_encoding", "upstream_content_length"} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("expected %s in logs, got=%s", want, logs)
+		}
+	}
+}
+
+func TestNonTranslatedResponseLogsMinimalHeaders(t *testing.T) {
+	var logged strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	old := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(old)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Upstream", "ok")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip, zstd")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	logs := logged.String()
+	if !strings.Contains(logs, "response_header_summary") {
+		t.Fatalf("expected response header summary log, got=%s", logs)
+	}
+	for _, want := range []string{"request_accept_encoding", "upstream_content_encoding", "upstream_content_type", "upstream_transfer_encoding", "upstream_content_length", "out_content_encoding", "out_content_type", "out_transfer_encoding", "out_content_length"} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("expected %s in logs, got=%s", want, logs)
+		}
+	}
+	if strings.Contains(logs, `{"ok":true}`) {
+		t.Fatalf("did not expect response body in logs, got=%s", logs)
+	}
+}
+
+func TestTrueStreamPassthroughSuccessDoesNotLogHeaderSummary(t *testing.T) {
+	var logged strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	old := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(old)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"ok\":true}\n\n")
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip, zstd")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `data: {"ok":true}`) {
+		t.Fatalf("expected stream passthrough body, got=%s", rr.Body.String())
+	}
+
+	logs := logged.String()
+	if strings.Contains(logs, "response_header_summary") {
+		t.Fatalf("did not expect success diagnostic log for true stream, got=%s", logs)
 	}
 }
 
@@ -1048,6 +1454,7 @@ func TestUpstreamNon2xxStreamLogsWithoutReadingBody(t *testing.T) {
 	body := `{"model":"test","stream":true}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip, zstd")
 	rr := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rr, req)
 
@@ -1055,7 +1462,15 @@ func TestUpstreamNon2xxStreamLogsWithoutReadingBody(t *testing.T) {
 	if !strings.Contains(logs, "upstream non-2xx response") {
 		t.Fatalf("expected log marker, got=%s", logs)
 	}
+	if strings.Contains(logs, body) {
+		t.Fatalf("did not expect request body in logs, got=%s", logs)
+	}
 	if strings.Contains(logs, "response_body") {
 		t.Fatalf("did not expect response_body logged for stream, got=%s", logs)
+	}
+	for _, want := range []string{"request_accept_encoding", "upstream_content_encoding", "upstream_content_type", "upstream_transfer_encoding", "upstream_content_length"} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("expected %s in logs, got=%s", want, logs)
+		}
 	}
 }
