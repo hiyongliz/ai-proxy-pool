@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -96,24 +97,31 @@ type RouteRule struct {
 	Providers   []string `yaml:"providers"`
 }
 
+type ModelRegexMapping struct {
+	Regex       string         `yaml:"regex"`
+	Replacement string         `yaml:"replacement"`
+	Compiled    *regexp.Regexp `yaml:"-"`
+}
+
 // ProviderConfig defines an upstream Claude-compatible provider.
 type ProviderConfig struct {
-	Name             string            `yaml:"name"`
-	BaseURL          string            `yaml:"base_url"`
-	PathPrefix       string            `yaml:"path_prefix"`
-	UpstreamPath     string            `yaml:"upstream_path"`
-	Enabled          *bool             `yaml:"enabled"`
-	Weight           int               `yaml:"weight"`
-	Timeout          time.Duration     `yaml:"timeout"`
-	APIKey           string            `yaml:"api_key"`
-	AuthType         string            `yaml:"auth_type"`
-	AuthHeader       string            `yaml:"auth_header"`
-	TargetAPI        string            `yaml:"target_api"`
-	RequestTranslate string            `yaml:"request_translate"`
-	StaticHeaders    map[string]string `yaml:"static_headers"`
-	ModelPrefixes    []string          `yaml:"model_prefixes"`
-	ModelRegex       string            `yaml:"model_regex"`
-	ModelMapping     map[string]string `yaml:"model_mapping"`
+	Name              string              `yaml:"name"`
+	BaseURL           string              `yaml:"base_url"`
+	PathPrefix        string              `yaml:"path_prefix"`
+	UpstreamPath      string              `yaml:"upstream_path"`
+	Enabled           *bool               `yaml:"enabled"`
+	Weight            int                 `yaml:"weight"`
+	Timeout           time.Duration       `yaml:"timeout"`
+	APIKey            string              `yaml:"api_key"`
+	AuthType          string              `yaml:"auth_type"`
+	AuthHeader        string              `yaml:"auth_header"`
+	TargetAPI         string              `yaml:"target_api"`
+	RequestTranslate  string              `yaml:"request_translate"`
+	StaticHeaders     map[string]string   `yaml:"static_headers"`
+	ModelPrefixes     []string            `yaml:"model_prefixes"`
+	ModelRegex        string              `yaml:"model_regex"`
+	ModelMapping      map[string]string   `yaml:"model_mapping"`
+	ModelRegexMapping []ModelRegexMapping `yaml:"model_regex_mapping"`
 }
 
 // Load reads and validates YAML config from disk.
