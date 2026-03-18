@@ -39,14 +39,14 @@ func ConvertClaudeRequestToCodex(req translator.TranslateRequest) (translator.Tr
 		"input":               []any{},
 		"parallel_tool_calls": true,
 		"reasoning": map[string]any{
-			"effort": "minimal",
+			"effort": normalizeReasoningEffort("minimal"),
 		},
 		"stream": stream,
 		"store":  false,
 	}
 	if shouldIncludeReasoningSummary(root) {
 		out["reasoning"] = map[string]any{
-			"effort":  reasoningEffort(root),
+			"effort":  normalizeReasoningEffort(reasoningEffort(root)),
 			"summary": "auto",
 		}
 		out["include"] = []string{"reasoning.encrypted_content"}
@@ -393,6 +393,17 @@ func reasoningEffort(root map[string]any) string {
 	}
 
 	return effort
+}
+
+func normalizeReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "medium", "high", "xhigh":
+		return effort
+	case "minimal", "none", "":
+		return "low"
+	default:
+		return "low"
+	}
 }
 
 func shouldIncludeReasoningSummary(root map[string]any) bool {

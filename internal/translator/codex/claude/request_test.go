@@ -334,7 +334,7 @@ func TestConvertClaudeRequestToCodexNoThinkingDisablesReasoningSummary(t *testin
 	if _, ok := reasoning["summary"]; ok {
 		t.Fatalf("unexpected reasoning summary: %#v", reasoning["summary"])
 	}
-	if reasoning["effort"] != "minimal" {
+	if reasoning["effort"] != "low" {
 		t.Fatalf("unexpected reasoning effort: %#v", reasoning["effort"])
 	}
 	if _, ok := payload["include"]; ok {
@@ -374,5 +374,55 @@ func TestConvertClaudeRequestToCodexThinkingEnabledKeepsReasoningSummary(t *test
 	include, ok := payload["include"].([]any)
 	if !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
 		t.Fatalf("unexpected include: %#v", payload["include"])
+	}
+}
+
+func TestReasoningEffortMinimalNormalized(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]any{
+		"model": "claude-opus-4-6",
+		"thinking": map[string]any{"type": "disabled"},
+	}
+	body, _ := json.Marshal(payload)
+	result, err := ConvertClaudeRequestToCodex(translator.TranslateRequest{Body: body})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(result.Body, &out)
+	reasoning, ok := out["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing reasoning: %#v", out)
+	}
+	if reasoning["effort"] != "low" {
+		t.Fatalf("expected low, got %#v", reasoning["effort"])
+	}
+}
+
+func TestReasoningEffortUnknownNormalized(t *testing.T) {
+	t.Parallel()
+
+	payload := map[string]any{
+		"model": "claude-opus-4-6",
+		"thinking": map[string]any{
+			"type": "enabled",
+			"budget_tokens": 1,
+		},
+		"output_config": map[string]any{"effort": "none"},
+	}
+	body, _ := json.Marshal(payload)
+	result, err := ConvertClaudeRequestToCodex(translator.TranslateRequest{Body: body})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(result.Body, &out)
+	reasoning, ok := out["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing reasoning: %#v", out)
+	}
+	if reasoning["effort"] != "low" {
+		t.Fatalf("expected low, got %#v", reasoning["effort"])
 	}
 }
