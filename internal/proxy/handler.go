@@ -395,6 +395,7 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 			w.Header().Set("X-Selected-Provider", selected.Name)
 		}
 		w.Header().Del("Content-Length")
+		w.Header().Del("Content-Encoding")
 
 		var written int64
 		if isStream {

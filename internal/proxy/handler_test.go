@@ -742,6 +742,7 @@ func TestClaudeToCodexRequestTranslate(t *testing.T) {
 func TestClaudeToCodexResponseTranslateStream(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "zstd")
 		stream := strings.Join([]string{
 			`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5-codex"}}`,
 			"",
@@ -794,6 +795,9 @@ func TestClaudeToCodexResponseTranslateStream(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected translated stream response to drop Content-Encoding, got %q", got)
+	}
 	body := rr.Body.String()
 	for _, want := range []string{
 		"event: message_start",
@@ -806,6 +810,72 @@ func TestClaudeToCodexResponseTranslateStream(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected stream response to contain %q, got=%s", want, body)
 		}
+	}
+}
+
+func TestClaudeToCodexResponseTranslateNonStreamDropsContentEncoding(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "zstd")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "resp_1",
+			"type":        "response",
+			"model":       "gpt-5-codex",
+			"stop_reason": "stop",
+			"usage": map[string]any{
+				"input_tokens":  10,
+				"output_tokens": 4,
+			},
+			"output": []any{
+				map[string]any{
+					"type": "message",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": "hello"},
+					},
+				},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+		},
+		Router: config.RouterConfig{
+			Strategy:        "round_robin",
+			DefaultProvider: "codex-1",
+		},
+		Providers: []config.ProviderConfig{
+			{
+				Name:             "codex-1",
+				BaseURL:          upstream.URL,
+				TargetAPI:        "codex",
+				RequestTranslate: "claude_to_codex",
+				AuthType:         "none",
+			},
+		},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":false,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected translated non-stream response to drop Content-Encoding, got %q", got)
 	}
 }
 
