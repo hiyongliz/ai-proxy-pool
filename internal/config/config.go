@@ -138,7 +138,7 @@ func Load(path string) (Config, error) {
 
 	applyDefaults(&cfg)
 	expandEnv(&cfg)
-	if err := validate(cfg); err != nil {
+	if err := validate(&cfg); err != nil {
 		return Config{}, err
 	}
 
@@ -222,7 +222,7 @@ func expandEnv(cfg *Config) {
 	}
 }
 
-func validate(cfg Config) error {
+func validate(cfg *Config) error {
 	if cfg.Server.Auth.Enabled && strings.TrimSpace(cfg.Server.Auth.Token) == "" {
 		return errors.New("server.auth.token cannot be empty when auth is enabled")
 	}
@@ -240,7 +240,20 @@ func validate(cfg Config) error {
 
 	nameSeen := map[string]struct{}{}
 	enabledSeen := map[string]struct{}{}
-	for _, p := range cfg.Providers {
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+
+		for j, r := range p.ModelRegexMapping {
+			if r.Regex == "" {
+				return fmt.Errorf("provider %q model_regex_mapping has empty regex", p.Name)
+			}
+			compiled, err := regexp.Compile(r.Regex)
+			if err != nil {
+				return fmt.Errorf("provider %q invalid regex %q: %w", p.Name, r.Regex, err)
+			}
+			p.ModelRegexMapping[j].Compiled = compiled
+		}
+
 		if p.Name == "" {
 			return errors.New("provider name cannot be empty")
 		}
