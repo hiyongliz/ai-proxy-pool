@@ -335,7 +335,7 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 		if !isStream {
 			rawBody, readErr := io.ReadAll(resp.Body)
 			if readErr != nil {
-				slog.Warn("upstream non-2xx response",
+				attrs := []any{
 					"provider", selected.Name,
 					"status", resp.StatusCode,
 					"method", upstreamReq.Method,
@@ -343,12 +343,14 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 					"upstream_path", upstreamReq.URL.Path,
 					"attempt", attempt,
 					"max_attempts", maxAttempts,
-					"request_body", string(body),
 					"read_error", readErr,
-				)
+				}
+				attrs = appendHeaderLogAttrs(attrs, "request_", r.Header)
+				attrs = appendHeaderLogAttrs(attrs, "upstream_", resp.Header)
+				slog.Warn("upstream non-2xx response", attrs...)
 				return resp.StatusCode, fmt.Errorf("read upstream body: %w", readErr)
 			}
-			slog.Warn("upstream non-2xx response",
+			attrs := []any{
 				"provider", selected.Name,
 				"status", resp.StatusCode,
 				"method", upstreamReq.Method,
@@ -356,12 +358,13 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 				"upstream_path", upstreamReq.URL.Path,
 				"attempt", attempt,
 				"max_attempts", maxAttempts,
-				"request_body", string(body),
-				"response_body", string(rawBody),
-			)
+			}
+			attrs = appendHeaderLogAttrs(attrs, "request_", r.Header)
+			attrs = appendHeaderLogAttrs(attrs, "upstream_", resp.Header)
+			slog.Warn("upstream non-2xx response", attrs...)
 			resp.Body = io.NopCloser(bytes.NewReader(rawBody))
 		} else {
-			slog.Warn("upstream non-2xx response",
+			attrs := []any{
 				"provider", selected.Name,
 				"status", resp.StatusCode,
 				"method", upstreamReq.Method,
@@ -369,8 +372,10 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 				"upstream_path", upstreamReq.URL.Path,
 				"attempt", attempt,
 				"max_attempts", maxAttempts,
-				"request_body", string(body),
-			)
+			}
+			attrs = appendHeaderLogAttrs(attrs, "request_", r.Header)
+			attrs = appendHeaderLogAttrs(attrs, "upstream_", resp.Header)
+			slog.Warn("upstream non-2xx response", attrs...)
 		}
 	}
 
@@ -381,6 +386,21 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 		return resp.StatusCode, fmt.Errorf("upstream returned %d", resp.StatusCode)
 	}
 
+	if shouldTranslateResponse(selected) {
+		copyResponseHeaders(w.Header(), resp.Header)
+		if s.cfg.Server.ExposeProviderOrDefault() {
+			w.Header().Set("X-Selected-Provider", selected.Name)
+		}
+		w.Header().Del("Content-Encoding")
+		w.Header().Del("Content-Length")
+
+		if r.Method == http.MethodHead || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified {
+			w.WriteHeader(resp.StatusCode)
+			s.recordUpstreamResponse(pStats, selected.Name, resp.StatusCode, upstreamStart, 0, attempt)
+			return resp.StatusCode, nil
+		}
+	}
+
 	if shouldTranslateResponse(selected) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		isStream := requestStreamOrDefault(body, false)
 		if r.URL.Path == "/v1/messages/count_tokens" {
@@ -389,12 +409,6 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 		if contentType := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(contentType, "text/event-stream") {
 			isStream = true
 		}
-
-		copyResponseHeaders(w.Header(), resp.Header)
-		if s.cfg.Server.ExposeProviderOrDefault() {
-			w.Header().Set("X-Selected-Provider", selected.Name)
-		}
-		w.Header().Del("Content-Length")
 
 		var written int64
 		if isStream {
@@ -427,6 +441,7 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 			return resp.StatusCode, responseWriteError{err: err}
 		}
 
+		logResponseHeaderSummary(selected.Name, resp.StatusCode, r.Header, resp.Header, w.Header())
 		s.recordUpstreamResponse(pStats, selected.Name, resp.StatusCode, upstreamStart, written, attempt)
 		return resp.StatusCode, nil
 	}
@@ -435,6 +450,46 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 	if s.cfg.Server.ExposeProviderOrDefault() {
 		w.Header().Set("X-Selected-Provider", selected.Name)
 	}
+
+	isStream := requestStreamOrDefault(body, false)
+	if r.URL.Path == "/v1/messages/count_tokens" {
+		isStream = false
+	}
+	if contentType := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(contentType, "text/event-stream") {
+		isStream = true
+	}
+
+	if r.Method == http.MethodHead || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified {
+		w.WriteHeader(resp.StatusCode)
+		s.recordUpstreamResponse(pStats, selected.Name, resp.StatusCode, upstreamStart, 0, attempt)
+		return resp.StatusCode, nil
+	}
+
+	if !isStream {
+		rawBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			w.Header().Del("Content-Length")
+			w.Header().Del("Content-Encoding")
+			return resp.StatusCode, fmt.Errorf("read upstream body: %w", readErr)
+		}
+		w.WriteHeader(resp.StatusCode)
+		var n int
+		n, err = w.Write(rawBody)
+		written := int64(n)
+		if err != nil {
+			slog.Error("proxy write response failed",
+				"provider", selected.Name,
+				"status", resp.StatusCode,
+				"error", err,
+			)
+			return resp.StatusCode, responseWriteError{err: err}
+		}
+
+		logResponseHeaderSummary(selected.Name, resp.StatusCode, r.Header, resp.Header, w.Header())
+		s.recordUpstreamResponse(pStats, selected.Name, resp.StatusCode, upstreamStart, written, attempt)
+		return resp.StatusCode, nil
+	}
+
 	w.WriteHeader(resp.StatusCode)
 	written, err := io.Copy(w, resp.Body)
 	if err != nil {
@@ -466,6 +521,27 @@ func (s *Server) recordUpstreamResponse(pStats *ProviderStats, providerName stri
 		"response_bytes", written,
 		"attempt", attempt,
 	)
+}
+
+func appendHeaderLogAttrs(attrs []any, prefix string, h http.Header) []any {
+	return append(attrs,
+		prefix+"accept_encoding", h.Get("Accept-Encoding"),
+		prefix+"content_encoding", h.Get("Content-Encoding"),
+		prefix+"content_type", h.Get("Content-Type"),
+		prefix+"transfer_encoding", h.Get("Transfer-Encoding"),
+		prefix+"content_length", h.Get("Content-Length"),
+	)
+}
+
+func logResponseHeaderSummary(providerName string, statusCode int, requestHeader, upstreamHeader, outHeader http.Header) {
+	attrs := []any{
+		"provider", providerName,
+		"status", statusCode,
+	}
+	attrs = appendHeaderLogAttrs(attrs, "request_", requestHeader)
+	attrs = appendHeaderLogAttrs(attrs, "upstream_", upstreamHeader)
+	attrs = appendHeaderLogAttrs(attrs, "out_", outHeader)
+	slog.Info("response_header_summary", attrs...)
 }
 
 type responseWriteError struct {
