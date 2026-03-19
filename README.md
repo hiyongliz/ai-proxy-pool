@@ -18,7 +18,7 @@ Go 实现的 Claude 多供应商智能代理服务。
 - 热重载：配置文件修改后自动生效，无需重启
 - Prometheus 指标：`GET /metrics`
 - 后台守护进程模式（`appool start`）
-- daemon 状态检查（`appool status`）
+- daemon 状态与用量展示（`appool status` / `appool status reset`）
 - 日志文件输出
 - 结构化请求/响应日志（含状态码、耗时、路由到的 provider）
 - 健康检查接口：`GET /healthz`
@@ -95,6 +95,7 @@ appool start            # 后台守护进程启动
 appool stop             # 停止后台进程
 appool restart          # 重启后台进程
 appool status           # 查看 daemon 状态
+appool status reset     # 清理 daemon 内存中的状态统计（请求/错误/延迟/token 等）
 appool logs             # 查看并持续跟随日志输出（带颜色高亮）
 appool config           # 交互式选择并切换激活配置文件
 appool version          # 查看版本信息
@@ -206,7 +207,11 @@ make install  # 安装到 $GOBIN（未设置时回退到 $GOPATH/bin）
 
 ```bash
 appool status
+appool status reset
 ```
+
+- `appool status`：查看当前各 provider 的请求、错误、延迟和 token 等统计；
+- `appool status reset`：清理上述统计计数，不影响熔断状态。
 
 ### 停止后台进程
 
