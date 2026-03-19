@@ -218,7 +218,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// 判断是否需要重试
 		shouldRetry := false
 
-
 		if isNetworkError(upstreamErr) && retryCfg.RetryOnNetworkOrDefault() {
 			shouldRetry = true
 			metrics.ProviderRetriesTotal.WithLabelValues(selected.Name, "network_error").Inc()
@@ -249,8 +248,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		"error": fmt.Sprintf("upstream request failed after %d attempts: %v", maxAttempts, lastErr),
 	})
 }
-
-
 
 func readRequestBodyWithLimit(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, error) {
 	limitedBody := http.MaxBytesReader(w, r.Body, maxBytes)

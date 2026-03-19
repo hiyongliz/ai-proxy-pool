@@ -993,8 +993,8 @@ func TestNonTranslatedResponseReadFailureReturnsBadGateway(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Config{
-		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
-		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
 		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
 	}
 
@@ -1037,8 +1037,8 @@ func TestNonTranslatedResponsePassthroughAfterSuccessfulRead(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Config{
-		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
-		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
 		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
 	}
 
@@ -1143,8 +1143,8 @@ func TestUpstreamNon2xxLogsRequestAndResponse(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Config{
-		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
-		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
 		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
 	}
 
@@ -1199,8 +1199,8 @@ func TestNonTranslatedResponseLogsMinimalHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Config{
-		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
-		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
 		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
 	}
 
@@ -1247,8 +1247,8 @@ func TestTrueStreamPassthroughSuccessDoesNotLogHeaderSummary(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Config{
-		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
-		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
 		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
 	}
 
@@ -1291,8 +1291,8 @@ func TestUpstreamNon2xxStreamLogsWithoutReadingBody(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Config{
-		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
-		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
 		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
 	}
 

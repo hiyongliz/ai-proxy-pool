@@ -3,27 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"runtime"
 	"strings"
 
+	"github.com/hiyongliz/ai-proxy-pool/internal/buildinfo"
 	"github.com/spf13/cobra"
 )
 
-var (
-	version   = "dev"
-	commit    = "none"
-	buildDate = "unknown"
-	builtBy   = "unknown"
-)
-
-type versionInfo struct {
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	BuildDate string `json:"build_date"`
-	BuiltBy   string `json:"built_by"`
-	Go        string `json:"go"`
-	Platform  string `json:"platform"`
-}
+type versionInfo = buildinfo.Info
 
 func init() {
 	rootCmd.AddCommand(newVersionCommand())
@@ -59,14 +45,7 @@ func newVersionCommand() *cobra.Command {
 }
 
 func getVersionInfo() versionInfo {
-	return versionInfo{
-		Version:   version,
-		Commit:    commit,
-		BuildDate: buildDate,
-		BuiltBy:   builtBy,
-		Go:        runtime.Version(),
-		Platform:  runtime.GOOS + "/" + runtime.GOARCH,
-	}
+	return buildinfo.Get()
 }
 
 func formatVersionOutput(info versionInfo, short, jsonOut bool) (string, error) {

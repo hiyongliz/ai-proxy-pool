@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+
+	"github.com/hiyongliz/ai-proxy-pool/internal/config"
 )
 
 // extractModel extracts the model name from a JSON request body.
@@ -46,11 +48,21 @@ func replaceModel(body []byte, to string) []byte {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(payload); err != nil {
+	if err := enc.Encode(&payload); err != nil {
 		return body
 	}
 
 	return bytes.TrimSpace(buf.Bytes())
+}
+
+func applyModelRegexMapping(model string, mappings []config.ModelRegexMapping) string {
+	for _, mapping := range mappings {
+		if mapping.Compiled == nil || !mapping.Compiled.MatchString(model) {
+			continue
+		}
+		return mapping.Compiled.ReplaceAllString(model, mapping.Replacement)
+	}
+	return model
 }
 
 // modelMetricLabel returns a normalized label for metrics based on the model name.

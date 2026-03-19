@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
@@ -57,6 +58,9 @@ func TestHandleStatusAllowsLoopback(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Body.String(); !strings.Contains(got, `"version": "dev"`) {
+		t.Fatalf("expected status payload to include daemon version, got body=%s", got)
 	}
 }
 

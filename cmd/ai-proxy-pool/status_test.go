@@ -42,10 +42,13 @@ func TestRenderStatusDashboardNoPanicOnMissingFields(t *testing.T) {
 			{Name: "p1", BaseURL: "https://example.com"},
 		},
 	}
-	renderStatusDashboard(&buf, map[string]any{}, map[string]proxy.ProviderStatView{}, cfg, false, 120)
+	renderStatusDashboard(&buf, map[string]any{}, map[string]proxy.ProviderStatView{}, cfg, "1.2.3", false, 120)
 	out := buf.String()
 	if !strings.Contains(out, "Strategy:") {
 		t.Fatalf("unexpected output: %q", out)
+	}
+	if !strings.Contains(out, "Version: cli=1.2.3 | daemon=unknown") {
+		t.Fatalf("expected version line with unknown daemon, got=%q", out)
 	}
 	if strings.Contains(out, "Press q to quit") {
 		t.Fatalf("unexpected watch hint in non-watch mode: %q", out)
@@ -61,9 +64,12 @@ func TestRenderStatusDashboardWatchHint(t *testing.T) {
 			{Name: "p1", BaseURL: "https://example.com"},
 		},
 	}
-	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, map[string]proxy.ProviderStatView{}, cfg, true, 120)
+	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin", "version": "2.0.0"}, map[string]proxy.ProviderStatView{}, cfg, "1.2.3", true, 120)
 	if !strings.Contains(buf.String(), "Press q to quit") {
 		t.Fatalf("expected watch hint, got=%q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "Version: cli=1.2.3 | daemon=2.0.0") {
+		t.Fatalf("expected dual version line, got=%q", buf.String())
 	}
 }
 
@@ -77,7 +83,7 @@ func TestRenderStatusDashboardWatchHintDoesNotPadToTableWidth(t *testing.T) {
 		},
 	}
 
-	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, map[string]proxy.ProviderStatView{}, cfg, true, 80)
+	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, map[string]proxy.ProviderStatView{}, cfg, "1.2.3", true, 80)
 
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	if len(lines) == 0 {
@@ -106,7 +112,7 @@ func TestRenderStatusDashboardUsesCompactTableOnMediumWidth(t *testing.T) {
 		},
 	}
 
-	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, stats, cfg, false, 85)
+	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, stats, cfg, "1.2.3", false, 85)
 	out := buf.String()
 	if !strings.Contains(out, "Provider") || !strings.Contains(out, "Req") || !strings.Contains(out, "Tokens") {
 		t.Fatalf("expected compact table headers, got=%q", out)
@@ -134,7 +140,7 @@ func TestRenderStatusDashboardUsesBlockLayoutOnNarrowWidth(t *testing.T) {
 		},
 	}
 
-	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, stats, cfg, false, 60)
+	renderStatusDashboard(&buf, map[string]any{"strategy": "round_robin"}, stats, cfg, "1.2.3", false, 60)
 	out := buf.String()
 	for _, want := range []string{"Provider: p1", "Status: Online", "Requests: 10 / 1", "Latency: 120ms", "Tokens: ↑20 / ↓40"} {
 		if !strings.Contains(out, want) {
@@ -214,6 +220,7 @@ func TestRunStatusOnce(t *testing.T) {
 			"server": map[string]any{
 				"uptime_seconds": 12,
 				"strategy":       "round_robin",
+				"version":        "2.0.0",
 			},
 			"providers": map[string]any{
 				"p1": map[string]any{
@@ -248,7 +255,7 @@ func TestRunStatusOnce(t *testing.T) {
 		t.Fatalf("runStatus: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"AI Proxy Pool Status", "p1", "round_robin"} {
+	for _, want := range []string{"AI Proxy Pool Status", "p1", "round_robin", "Version: cli=dev | daemon=2.0.0"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected output to contain %q, got=%q", want, out)
 		}

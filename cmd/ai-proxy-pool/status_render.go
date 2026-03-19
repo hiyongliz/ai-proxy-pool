@@ -24,7 +24,7 @@ type statusRow struct {
 	Tokens     string
 }
 
-func renderStatusDashboard(out io.Writer, server map[string]any, stats map[string]proxy.ProviderStatView, cfg config.Config, watch bool, width int) {
+func renderStatusDashboard(out io.Writer, server map[string]any, stats map[string]proxy.ProviderStatView, cfg config.Config, cliVersion string, watch bool, width int) {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42")).MarginBottom(1)
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
 	cellStyle := lipgloss.NewStyle()
@@ -33,14 +33,24 @@ func renderStatusDashboard(out io.Writer, server map[string]any, stats map[strin
 	uptimeSeconds := asInt(server["uptime_seconds"])
 	uptime := time.Duration(uptimeSeconds) * time.Second
 	strategy := asString(server["strategy"])
+	daemonVersion := asString(server["version"])
 	if strategy == "" {
 		strategy = "unknown"
 	}
+	if strings.TrimSpace(cliVersion) == "" {
+		cliVersion = "unknown"
+	}
+	if strings.TrimSpace(daemonVersion) == "" {
+		daemonVersion = "unknown"
+	}
+
+	versionLine := fmt.Sprintf("Version: cli=%s | daemon=%s", cliVersion, daemonVersion)
 
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, titleStyle.Render("AI Proxy Pool Status"))
 	fmt.Fprintf(out, "  Uptime:   %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render(uptime.String()))
 	fmt.Fprintf(out, "  Strategy: %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render(strategy))
+	fmt.Fprintf(out, "  %s\n", lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render(versionLine))
 	fmt.Fprintln(out)
 
 	rows := buildStatusRows(stats, cfg.Providers)

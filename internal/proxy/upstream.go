@@ -238,16 +238,18 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 	upstreamModel = translatedModel
 	modelLabel = modelMetricLabel(upstreamModel)
 
+	exactModelMapped := false
 	if upstreamModel != "" && len(selected.ModelMapping) > 0 {
 		if mapped, ok := selected.ModelMapping[upstreamModel]; ok {
 			sourceModel := upstreamModel
 			upstreamModel = mapped
+			exactModelMapped = true
 			modelLabel = modelMetricLabel(mapped)
 			upstreamBody = replaceModel(upstreamBody, mapped)
 			slog.Info("model mapped", "provider", selected.Name, "from", sourceModel, "to", mapped)
 		}
 	}
-	if upstreamModel != "" && len(selected.ModelRegexMapping) > 0 {
+	if !exactModelMapped && upstreamModel != "" && len(selected.ModelRegexMapping) > 0 {
 		mapped := applyModelRegexMapping(upstreamModel, selected.ModelRegexMapping)
 		if mapped != upstreamModel {
 			sourceModel := upstreamModel

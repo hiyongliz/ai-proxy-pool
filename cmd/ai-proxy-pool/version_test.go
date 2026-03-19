@@ -6,13 +6,15 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/hiyongliz/ai-proxy-pool/internal/buildinfo"
 )
 
 func TestVersionCommandDefaultOutput(t *testing.T) {
-	origVersion, origCommit, origBuildDate, origBuiltBy := version, commit, buildDate, builtBy
-	version, commit, buildDate, builtBy = "1.2.3", "abc1234", "2026-03-05T00:00:00Z", "ci"
+	origVersion, origCommit, origBuildDate, origBuiltBy := buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate, buildinfo.BuiltBy
+	buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate, buildinfo.BuiltBy = "1.2.3", "abc1234", "2026-03-05T00:00:00Z", "ci"
 	t.Cleanup(func() {
-		version, commit, buildDate, builtBy = origVersion, origCommit, origBuildDate, origBuiltBy
+		buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate, buildinfo.BuiltBy = origVersion, origCommit, origBuildDate, origBuiltBy
 	})
 
 	buf := bytes.NewBuffer(nil)
@@ -33,9 +35,9 @@ func TestVersionCommandDefaultOutput(t *testing.T) {
 }
 
 func TestVersionCommandShortOutput(t *testing.T) {
-	origVersion := version
-	version = "9.9.9"
-	t.Cleanup(func() { version = origVersion })
+	origVersion := buildinfo.Version
+	buildinfo.Version = "9.9.9"
+	t.Cleanup(func() { buildinfo.Version = origVersion })
 
 	buf := bytes.NewBuffer(nil)
 	cmd := newVersionCommand()
@@ -53,10 +55,10 @@ func TestVersionCommandShortOutput(t *testing.T) {
 }
 
 func TestVersionCommandJSONOutput(t *testing.T) {
-	origVersion, origCommit, origBuildDate, origBuiltBy := version, commit, buildDate, builtBy
-	version, commit, buildDate, builtBy = "2.0.0", "ff00ff", "2026-03-05T01:02:03Z", "release-bot"
+	origVersion, origCommit, origBuildDate, origBuiltBy := buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate, buildinfo.BuiltBy
+	buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate, buildinfo.BuiltBy = "2.0.0", "ff00ff", "2026-03-05T01:02:03Z", "release-bot"
 	t.Cleanup(func() {
-		version, commit, buildDate, builtBy = origVersion, origCommit, origBuildDate, origBuiltBy
+		buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate, buildinfo.BuiltBy = origVersion, origCommit, origBuildDate, origBuiltBy
 	})
 
 	buf := bytes.NewBuffer(nil)

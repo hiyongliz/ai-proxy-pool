@@ -71,9 +71,9 @@ func TestLoadRejectsNonPositiveCircuitBreaker(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name   string
-		yaml   string
-		error  string
+		name  string
+		yaml  string
+		error string
 	}{
 		{
 			name: "non-positive threshold",

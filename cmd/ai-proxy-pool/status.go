@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/term"
+	"github.com/hiyongliz/ai-proxy-pool/internal/buildinfo"
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
 	"github.com/hiyongliz/ai-proxy-pool/internal/proxy"
 	"github.com/spf13/cobra"
@@ -70,7 +71,7 @@ func runStatus(out io.Writer, watch bool) error {
 		if err != nil {
 			return err
 		}
-		renderStatusDashboard(out, payload.Server, payload.Providers, cfg, false, statusDashboardWidth(out))
+		renderStatusDashboard(out, payload.Server, payload.Providers, cfg, buildinfo.Version, false, statusDashboardWidth(out))
 		return nil
 	}
 
@@ -100,7 +101,7 @@ func runStatus(out io.Writer, watch bool) error {
 			fmt.Fprintf(out, "\r\033[Kstatus fetch failed: %v\n", err)
 		} else {
 			fmt.Fprint(out, "\033[H\033[2J")
-			renderStatusDashboard(out, payload.Server, payload.Providers, cfg, true, statusDashboardWidth(out))
+			renderStatusDashboard(out, payload.Server, payload.Providers, cfg, buildinfo.Version, true, statusDashboardWidth(out))
 		}
 
 		select {

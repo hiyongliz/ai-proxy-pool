@@ -43,10 +43,10 @@ func TestProxyRouting(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":    "resp_1",
-			"type":  "response",
-			"model": "gpt-5-codex",
-			"usage": map[string]any{"input_tokens": 42, "output_tokens": 0},
+			"id":     "resp_1",
+			"type":   "response",
+			"model":  "gpt-5-codex",
+			"usage":  map[string]any{"input_tokens": 42, "output_tokens": 0},
 			"output": []any{},
 		})
 	}))
@@ -513,7 +513,7 @@ func TestModelMapping(t *testing.T) {
 		}
 	})
 
-	t.Run("exact mapping wins over regex fallback", func(t *testing.T) {
+	t.Run("regex mappings use first match in order", func(t *testing.T) {
 		var receivedModel string
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
@@ -534,10 +534,12 @@ func TestModelMapping(t *testing.T) {
 				{
 					Name:    "backup",
 					BaseURL: upstream.URL,
-					ModelMapping: map[string]string{
-						"claude-opus-4-6": "claude-opus-4-5",
-					},
 					ModelRegexMapping: []config.ModelRegexMapping{
+						{
+							Regex:       "^claude-.*",
+							Replacement: "claude-custom",
+							Compiled:    regexp.MustCompile("^claude-.*"),
+						},
 						{
 							Regex:       ".*",
 							Replacement: "gpt-5.3-codex",
@@ -561,8 +563,8 @@ func TestModelMapping(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 		}
-		if receivedModel != "claude-opus-4-5" {
-			t.Fatalf("expected upstream model %q, got %q", "claude-opus-4-5", receivedModel)
+		if receivedModel != "claude-custom" {
+			t.Fatalf("expected upstream model %q, got %q", "claude-custom", receivedModel)
 		}
 	})
 }

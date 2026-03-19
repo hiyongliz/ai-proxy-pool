@@ -6,7 +6,7 @@ COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE     ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILT_BY ?= local
 GOBIN    ?= $(shell sh -c 'if [ -n "$$GOBIN" ]; then printf %s "$$GOBIN"; else printf %s "$$(go env GOPATH)/bin"; fi')
-LDFLAGS  := -X 'main.version=$(VERSION)' -X 'main.commit=$(COMMIT)' -X 'main.buildDate=$(DATE)' -X 'main.builtBy=$(BUILT_BY)'
+LDFLAGS  := -X 'github.com/hiyongliz/ai-proxy-pool/internal/buildinfo.Version=$(VERSION)' -X 'github.com/hiyongliz/ai-proxy-pool/internal/buildinfo.Commit=$(COMMIT)' -X 'github.com/hiyongliz/ai-proxy-pool/internal/buildinfo.BuildDate=$(DATE)' -X 'github.com/hiyongliz/ai-proxy-pool/internal/buildinfo.BuiltBy=$(BUILT_BY)'
 
 .PHONY: build run test fmt lint coverage clean install
 

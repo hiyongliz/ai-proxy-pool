@@ -309,4 +309,3 @@ func requestStreamOrDefault(body []byte, def bool) bool {
 	}
 	return b
 }
-

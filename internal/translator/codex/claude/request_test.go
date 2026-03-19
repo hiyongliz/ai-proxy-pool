@@ -104,7 +104,6 @@ func asTestInt64(v any) int64 {
 	}
 }
 
-
 func TestConvertClaudeRequestToCodexTools(t *testing.T) {
 	t.Parallel()
 
@@ -381,7 +380,7 @@ func TestReasoningEffortMinimalNormalized(t *testing.T) {
 	t.Parallel()
 
 	payload := map[string]any{
-		"model": "claude-opus-4-6",
+		"model":    "claude-opus-4-6",
 		"thinking": map[string]any{"type": "disabled"},
 	}
 	body, _ := json.Marshal(payload)
@@ -406,7 +405,7 @@ func TestReasoningEffortUnknownNormalized(t *testing.T) {
 	payload := map[string]any{
 		"model": "claude-opus-4-6",
 		"thinking": map[string]any{
-			"type": "enabled",
+			"type":          "enabled",
 			"budget_tokens": 1,
 		},
 		"output_config": map[string]any{"effort": "none"},

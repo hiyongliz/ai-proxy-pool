@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/hiyongliz/ai-proxy-pool/internal/buildinfo"
 )
 
 // handleStatus 内部暴漏出一个零依赖的本地 HTTP API 供前端 status 命令查询
@@ -23,6 +25,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"uptime_seconds": int(time.Since(serverStartTime).Seconds()),
 			"providers":      len(s.cfg.Providers),
 			"strategy":       s.cfg.Router.Strategy,
+			"version":        buildinfo.Version,
 		},
 		"providers": stats,
 	}
