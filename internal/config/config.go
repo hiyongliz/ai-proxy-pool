@@ -39,15 +39,22 @@ type Config struct {
 
 // ServerConfig controls HTTP server and upstream timeout behavior.
 type ServerConfig struct {
-	ListenAddr          string        `yaml:"listen_addr"`
-	ReadTimeout         time.Duration `yaml:"read_timeout"`
-	WriteTimeout        time.Duration `yaml:"write_timeout"`
-	IdleTimeout         time.Duration `yaml:"idle_timeout"`
-	UpstreamTimeout     time.Duration `yaml:"upstream_timeout"`
-	MaxRequestBodyBytes int64         `yaml:"max_request_body_bytes"`
-	ExposeProvider      *bool         `yaml:"expose_provider"`
-	Auth                AuthConfig    `yaml:"auth"`
-	Retry               RetryConfig   `yaml:"retry"`
+	ListenAddr          string               `yaml:"listen_addr"`
+	ReadTimeout         time.Duration        `yaml:"read_timeout"`
+	WriteTimeout        time.Duration        `yaml:"write_timeout"`
+	IdleTimeout         time.Duration        `yaml:"idle_timeout"`
+	UpstreamTimeout     time.Duration        `yaml:"upstream_timeout"`
+	MaxRequestBodyBytes int64                `yaml:"max_request_body_bytes"`
+	ExposeProvider      *bool                `yaml:"expose_provider"`
+	Auth                AuthConfig           `yaml:"auth"`
+	Retry               RetryConfig          `yaml:"retry"`
+	CircuitBreaker      CircuitBreakerConfig `yaml:"circuit_breaker"`
+}
+
+// CircuitBreakerConfig controls provider circuit breaker behavior.
+type CircuitBreakerConfig struct {
+	Threshold    int           `yaml:"threshold"`
+	OpenDuration time.Duration `yaml:"open_duration"`
 }
 
 // RetryConfig controls upstream request retry behavior.
@@ -175,6 +182,13 @@ func applyDefaults(cfg *Config) {
 		cfg.Server.Retry.MaxAttempts = 3
 	}
 
+	// 熔断默认值：仅当整个配置块为空（两个字段都为零值）时才填充，
+	// 若用户显式配置了其中任意一个字段，则交由 validate 做合法性校验。
+	if cfg.Server.CircuitBreaker.Threshold == 0 && cfg.Server.CircuitBreaker.OpenDuration == 0 {
+		cfg.Server.CircuitBreaker.Threshold = 3
+		cfg.Server.CircuitBreaker.OpenDuration = 120 * time.Second
+	}
+
 	if cfg.Router.Strategy == "" {
 		cfg.Router.Strategy = StrategyRoundRobin
 	}
@@ -228,6 +242,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Server.MaxRequestBodyBytes <= 0 {
 		return errors.New("server.max_request_body_bytes must be greater than 0")
+	}
+	if cfg.Server.CircuitBreaker.Threshold <= 0 {
+		return errors.New("server.circuit_breaker.threshold must be greater than 0")
+	}
+	if cfg.Server.CircuitBreaker.OpenDuration <= 0 {
+		return errors.New("server.circuit_breaker.open_duration must be greater than 0")
 	}
 
 	if len(cfg.Providers) == 0 {

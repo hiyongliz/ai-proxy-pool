@@ -25,8 +25,6 @@ import (
 const (
 	defaultMaxRequestBodyBytes = 8 * 1024 * 1024
 	defaultUpstreamTimeout     = 300 * time.Second
-	circuitBreakerThreshold    = 3
-	circuitBreakerDurationSec  = 120
 )
 
 // Server is an HTTP proxy that routes requests to configured providers.
@@ -136,6 +134,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		maxAttempts = 1
 	}
 
+	cbCfg := s.cfg.Server.CircuitBreaker
+	threshold := cbCfg.Threshold
+	openDuration := cbCfg.OpenDuration
+
 	var excludedProviders []string
 	var lastErr error
 
@@ -175,9 +177,26 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&pStats.ActiveConnections, -1)
 		atomic.AddInt64(&pStats.TotalRequests, 1)
 
+		// 先根据状态码/错误更新熔断计数
+		if isProviderFatalError(statusCode, upstreamErr) {
+			fails := atomic.AddInt32(&pStats.ConsecutiveErrors, 1)
+			if threshold > 0 && openDuration > 0 && fails >= int32(threshold) {
+				openUntil := time.Now().Add(openDuration).Unix()
+				// 触发熔断：隔离
+				atomic.StoreInt64(&pStats.CircuitOpenUntil, openUntil)
+				slog.Warn("provider circuit breaker triggered",
+					"provider", selected.Name,
+					"threshold", threshold,
+					"open_duration", openDuration.String(),
+				)
+			}
+		} else {
+			// 非致命错误（比如 400 Bad Request），以及成功的 2xx/3xx，清零错误池
+			atomic.StoreInt32(&pStats.ConsecutiveErrors, 0)
+		}
+
 		if upstreamErr == nil {
 			atomic.AddInt64(&pStats.SuccessRequests, 1)
-			atomic.StoreInt32(&pStats.ConsecutiveErrors, 0)
 			return // 成功，直接返回
 		}
 
@@ -200,18 +219,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		// 判断是否需要重试
 		shouldRetry := false
 
-		// 判断连贯失误是否触及致命级熔断
-		if isProviderFatalError(statusCode, upstreamErr) {
-			fails := atomic.AddInt32(&pStats.ConsecutiveErrors, 1)
-			if fails >= circuitBreakerThreshold {
-				// 触发熔断：隔离
-				atomic.StoreInt64(&pStats.CircuitOpenUntil, time.Now().Unix()+circuitBreakerDurationSec)
-				slog.Warn("provider circuit breaker triggered", "provider", selected.Name, "duration_sec", circuitBreakerDurationSec)
-			}
-		} else {
-			// 非致命错误（比如 400 Bad Request），以及成功的 2xx/3xx，清零错误池
-			atomic.StoreInt32(&pStats.ConsecutiveErrors, 0)
-		}
 
 		if isNetworkError(upstreamErr) && retryCfg.RetryOnNetworkOrDefault() {
 			shouldRetry = true

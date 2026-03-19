@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeConfigFile(t *testing.T, content string) string {
@@ -37,6 +38,12 @@ providers:
 	if cfg.Server.MaxRequestBodyBytes != 8*1024*1024 {
 		t.Fatalf("unexpected max request body bytes: got=%d", cfg.Server.MaxRequestBodyBytes)
 	}
+	if cfg.Server.CircuitBreaker.Threshold != 3 {
+		t.Fatalf("unexpected circuit breaker threshold: got=%d", cfg.Server.CircuitBreaker.Threshold)
+	}
+	if cfg.Server.CircuitBreaker.OpenDuration != 120*time.Second {
+		t.Fatalf("unexpected circuit breaker open duration: got=%s", cfg.Server.CircuitBreaker.OpenDuration)
+	}
 }
 
 func TestLoadRejectsNonPositiveMaxRequestBodyBytes(t *testing.T) {
@@ -57,6 +64,85 @@ providers:
 	}
 	if !strings.Contains(err.Error(), "server.max_request_body_bytes") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsNonPositiveCircuitBreaker(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		yaml   string
+		error  string
+	}{
+		{
+			name: "non-positive threshold",
+			yaml: `
+server:
+  circuit_breaker:
+    threshold: 0
+    open_duration: 120s
+router: {}
+providers:
+  - name: "p1"
+    base_url: "https://example.com"
+`,
+			error: "server.circuit_breaker.threshold",
+		},
+		{
+			name: "non-positive open_duration",
+			yaml: `
+server:
+  circuit_breaker:
+    threshold: 3
+    open_duration: 0s
+router: {}
+providers:
+  - name: "p1"
+    base_url: "https://example.com"
+`,
+			error: "server.circuit_breaker.open_duration",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigFile(t, tc.yaml)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.error) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsCustomCircuitBreaker(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `
+server:
+  circuit_breaker:
+    threshold: 5
+    open_duration: 30s
+router: {}
+providers:
+  - name: "p1"
+    base_url: "https://example.com"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.Server.CircuitBreaker.Threshold != 5 {
+		t.Fatalf("unexpected circuit breaker threshold: got=%d", cfg.Server.CircuitBreaker.Threshold)
+	}
+	if cfg.Server.CircuitBreaker.OpenDuration != 30*time.Second {
+		t.Fatalf("unexpected circuit breaker open duration: got=%s", cfg.Server.CircuitBreaker.OpenDuration)
 	}
 }
 
