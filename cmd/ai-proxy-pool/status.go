@@ -44,6 +44,16 @@ func newStatusCommand() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "refresh every second until q or Ctrl+C")
+
+	resetCmd := &cobra.Command{
+		Use:   "reset",
+		Short: "Reset status statistics on the proxy server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runStatusReset(cmd.OutOrStdout())
+		},
+	}
+	cmd.AddCommand(resetCmd)
+
 	return cmd
 }
 
@@ -353,6 +363,36 @@ func statusDashboardWidth(out io.Writer) int {
 		}
 	}
 	return 120
+}
+
+func runStatusReset(out io.Writer) error {
+	cfgPath := resolveConfigPath()
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return fmt.Errorf("load config failed: %w", err)
+	}
+
+	addr := normalizeStatusAddr(cfg.Server.ListenAddr)
+	url := fmt.Sprintf("http://%s/api/internal/status/reset", addr)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return fmt.Errorf("build status reset request failed: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("could not connect to proxy daemon (is it running?): %w (url=%s)", err, url)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status reset failed: %s", resp.Status)
+	}
+
+	fmt.Fprintln(out, "Status metrics reset successfully.")
+	return nil
 }
 
 func statusColumnWidths(totalWidth int) []int {

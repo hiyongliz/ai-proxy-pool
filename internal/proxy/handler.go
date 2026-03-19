@@ -27,7 +27,6 @@ const (
 	defaultUpstreamTimeout     = 300 * time.Second
 	circuitBreakerThreshold    = 3
 	circuitBreakerDurationSec  = 120
-	tokenEstimateDivisor       = 4
 )
 
 // Server is an HTTP proxy that routes requests to configured providers.
@@ -92,6 +91,7 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/api/internal/status", s.handleStatus) // 新增纯本地管理的私有接口
+	mux.HandleFunc("/api/internal/status/reset", s.handleStatusReset)
 	mux.HandleFunc("/", s.handleProxy)
 	return s.loggingMiddleware(mux)
 }
@@ -279,11 +279,6 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 		return 0, fmt.Errorf("build upstream request: %w", err)
 	}
 
-	// 简单解析请求体算一下 Input Token 估值 (按经验 1 token = 4 字节的粗略估算，如果 JSON 里有明确的 tokens 可提取更准)
-	if len(body) > 0 {
-		atomic.AddInt64(&pStats.PromptTokens, int64(len(body)/tokenEstimateDivisor))
-	}
-
 	client, ok := s.clients[selected.Name]
 	if !ok {
 		return 0, fmt.Errorf("selected provider %q client missing", selected.Name)
@@ -414,7 +409,14 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 		if isStream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(resp.StatusCode)
-			written, err = translateStreamResponseForProvider(selected, body, w, resp.Body)
+			var tokenUsage tokenUsage
+			written, tokenUsage, err = translateStreamResponseForProvider(selected, body, w, resp.Body)
+			if tokenUsage.HasInput {
+				atomic.AddInt64(&pStats.PromptTokens, tokenUsage.Input)
+			}
+			if tokenUsage.HasOutput {
+				atomic.AddInt64(&pStats.CompletionTokens, tokenUsage.Output)
+			}
 		} else {
 			rawBody, readErr := io.ReadAll(resp.Body)
 			if readErr != nil {
@@ -423,6 +425,17 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 			translatedBody, translateErr := translateNonStreamResponseForProvider(selected, r.URL.Path, body, rawBody)
 			if translateErr != nil {
 				return resp.StatusCode, fmt.Errorf("translate upstream response: %w", translateErr)
+			}
+
+			tokenUsage := extractUsageFromCodexResponseBody(rawBody)
+			if !tokenUsage.HasInput && !tokenUsage.HasOutput {
+				tokenUsage = extractUsageFromResponseBody(r.URL.Path, translatedBody)
+			}
+			if tokenUsage.HasInput {
+				atomic.AddInt64(&pStats.PromptTokens, tokenUsage.Input)
+			}
+			if tokenUsage.HasOutput {
+				atomic.AddInt64(&pStats.CompletionTokens, tokenUsage.Output)
 			}
 
 			w.Header().Set("Content-Type", "application/json")
@@ -510,9 +523,6 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 // recordUpstreamResponse updates stats and logs the upstream response.
 func (s *Server) recordUpstreamResponse(pStats *ProviderStats, providerName string, statusCode int, start time.Time, written int64, attempt int) {
 	atomic.AddInt64(&pStats.TotalBytes, written)
-	if written > 0 {
-		atomic.AddInt64(&pStats.CompletionTokens, written/tokenEstimateDivisor)
-	}
 
 	slog.Info("upstream response",
 		"provider", providerName,

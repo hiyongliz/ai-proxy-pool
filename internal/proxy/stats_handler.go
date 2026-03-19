@@ -36,6 +36,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleStatusReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	if !isLoopbackRequest(r.RemoteAddr) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+
+	if s.stats != nil {
+		s.stats.ResetAllCounters()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func isLoopbackRequest(remoteAddr string) bool {
 	host := remoteAddr
 	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {

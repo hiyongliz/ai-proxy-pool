@@ -56,6 +56,23 @@ type GlobalStats struct {
 	providers sync.Map // string -> *ProviderStats
 }
 
+// ResetAllCounters clears all counter fields for every provider, while preserving
+// circuit breaker state such as ConsecutiveErrors and CircuitOpenUntil.
+func (g *GlobalStats) ResetAllCounters() {
+	g.providers.Range(func(key, value any) bool {
+		ps := value.(*ProviderStats)
+		atomic.StoreInt64(&ps.ActiveConnections, 0)
+		atomic.StoreInt64(&ps.TotalRequests, 0)
+		atomic.StoreInt64(&ps.SuccessRequests, 0)
+		atomic.StoreInt64(&ps.ErrorRequests, 0)
+		atomic.StoreInt64(&ps.TotalDurationMs, 0)
+		atomic.StoreInt64(&ps.TotalBytes, 0)
+		atomic.StoreInt64(&ps.PromptTokens, 0)
+		atomic.StoreInt64(&ps.CompletionTokens, 0)
+		return true
+	})
+}
+
 // GetOrCreate returns the stats counter for a provider, thread-safe.
 func (g *GlobalStats) GetOrCreate(provider string) *ProviderStats {
 	if val, ok := g.providers.Load(provider); ok {

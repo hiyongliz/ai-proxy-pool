@@ -254,3 +254,80 @@ func TestRunStatusOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusResetCallsInternalAPI(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	var called int32
+
+	statusSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/internal/status/reset" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method: %s", r.Method)
+		}
+		called++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer statusSrv.Close()
+
+	addr := strings.TrimPrefix(statusSrv.URL, "http://")
+	cfgPath := filepath.Join(home, ".ai_proxy_pool", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfgBody := []byte("server:\n  listen_addr: \"" + addr + "\"\nrouter: {}\nproviders:\n  - name: \"p1\"\n    base_url: \"https://example.com\"\n")
+	if err := os.WriteFile(cfgPath, cfgBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := runStatusReset(&buf); err != nil {
+		t.Fatalf("runStatusReset: %v", err)
+	}
+
+	if called != 1 {
+		t.Fatalf("expected reset endpoint to be called once, got %d", called)
+	}
+
+	if !strings.Contains(buf.String(), "Status metrics reset successfully.") {
+		t.Fatalf("unexpected output: %s", buf.String())
+	}
+}
+
+func TestStatusResetErrorOnNon200(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	statusSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/internal/status/reset" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer statusSrv.Close()
+
+	addr := strings.TrimPrefix(statusSrv.URL, "http://")
+	cfgPath := filepath.Join(home, ".ai_proxy_pool", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	cfgBody := []byte("server:\n  listen_addr: \"" + addr + "\"\nrouter: {}\nproviders:\n  - name: \"p1\"\n    base_url: \"https://example.com\"\n")
+	if err := os.WriteFile(cfgPath, cfgBody, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var buf bytes.Buffer
+	err := runStatusReset(&buf)
+	if err == nil || !strings.Contains(err.Error(), "status reset failed") {
+		t.Fatalf("expected status reset failed error, got: %v", err)
+	}
+}
