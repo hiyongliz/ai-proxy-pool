@@ -16,6 +16,10 @@ import (
 )
 
 func TestProxyRouting(t *testing.T) {
+	stats := GetGlobalStats()
+	promptBefore := stats.Snapshot()["codex"].PromptTokens
+	completionBefore := stats.Snapshot()["codex"].CompletionTokens
+
 	upstreamA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"provider": "a",
@@ -150,7 +154,495 @@ func TestProxyRouting(t *testing.T) {
 		if payload["input_tokens"] != float64(42) {
 			t.Fatalf("unexpected input_tokens: %#v", payload["input_tokens"])
 		}
+
+		afterCountTokens := stats.Snapshot()["codex"]
+		if got := afterCountTokens.PromptTokens - promptBefore; got != 42 {
+			t.Fatalf("count_tokens should accumulate real prompt tokens, got delta=%d", got)
+		}
+		if got := afterCountTokens.CompletionTokens - completionBefore; got != 0 {
+			t.Fatalf("count_tokens should not accumulate completion tokens, got delta=%d", got)
+		}
 	})
+}
+
+func TestStatsTokenUseRealUsageForTranslatedNonStream(t *testing.T) {
+	stats := GetGlobalStats()
+	providerName := "codex-usage-nonstream"
+	before := stats.Snapshot()[providerName]
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "resp_1",
+			"type":        "response",
+			"model":       "gpt-5-codex",
+			"stop_reason": "stop",
+			"usage": map[string]any{
+				"input_tokens":  11,
+				"output_tokens": 7,
+			},
+			"output": []any{
+				map[string]any{
+					"type": "message",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": "hello"},
+					},
+				},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: providerName},
+		Providers: []config.ProviderConfig{{
+			Name:             providerName,
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":false,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	after := stats.Snapshot()[providerName]
+	if got := after.PromptTokens - before.PromptTokens; got != 11 {
+		t.Fatalf("prompt token delta mismatch: got=%d want=11", got)
+	}
+	if got := after.CompletionTokens - before.CompletionTokens; got != 7 {
+		t.Fatalf("completion token delta mismatch: got=%d want=7", got)
+	}
+}
+
+type streamProbeResponseWriter struct {
+	header       http.Header
+	statusCode   int
+	buf          bytes.Buffer
+	firstWriteCh chan struct{}
+	notified     bool
+}
+
+func newStreamProbeResponseWriter() *streamProbeResponseWriter {
+	return &streamProbeResponseWriter{
+		header:       make(http.Header),
+		statusCode:   http.StatusOK,
+		firstWriteCh: make(chan struct{}, 1),
+	}
+}
+
+func (w *streamProbeResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *streamProbeResponseWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+}
+
+func (w *streamProbeResponseWriter) Write(p []byte) (int, error) {
+	n, err := w.buf.Write(p)
+	if !w.notified && n > 0 {
+		w.notified = true
+		select {
+		case w.firstWriteCh <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
+
+func (w *streamProbeResponseWriter) Flush() {}
+
+func (w *streamProbeResponseWriter) StatusCode() int {
+	return w.statusCode
+}
+
+func (w *streamProbeResponseWriter) BodyString() string {
+	return w.buf.String()
+}
+
+func TestStatsTokenUseRealUsageForTranslatedStream(t *testing.T) {
+	stats := GetGlobalStats()
+	providerName := "codex-usage-stream"
+	before := stats.Snapshot()[providerName]
+	firstChunkSent := make(chan struct{}, 1)
+	allowComplete := make(chan struct{})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5-codex\"}}\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case firstChunkSent <- struct{}{}:
+		default:
+		}
+		<-allowComplete
+		stream := strings.Join([]string{
+			`data: {"type":"response.output_text.delta","delta":"hello"}`,
+			"",
+			`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":9,"output_tokens":5}}}`,
+			"",
+		}, "\n")
+		_, _ = io.WriteString(w, stream)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: providerName},
+		Providers: []config.ProviderConfig{{
+			Name:             providerName,
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":true,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	probe := newStreamProbeResponseWriter()
+
+	done := make(chan struct{})
+	go func() {
+		server.Handler().ServeHTTP(probe, req)
+		close(done)
+	}()
+
+	select {
+	case <-firstChunkSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting first upstream chunk")
+	}
+
+	select {
+	case <-probe.firstWriteCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting first downstream write after upstream first chunk")
+	}
+
+	select {
+	case <-done:
+		t.Fatal("stream finished before completion event, looks buffered instead of streaming")
+	default:
+	}
+
+	close(allowComplete)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting stream response finish")
+	}
+
+	if probe.StatusCode() != http.StatusOK {
+		t.Fatalf("status=%d body=%s", probe.StatusCode(), probe.BodyString())
+	}
+
+	after := stats.Snapshot()[providerName]
+	if got := after.PromptTokens - before.PromptTokens; got != 9 {
+		t.Fatalf("prompt token delta mismatch: got=%d want=9", got)
+	}
+	if got := after.CompletionTokens - before.CompletionTokens; got != 5 {
+		t.Fatalf("completion token delta mismatch: got=%d want=5", got)
+	}
+}
+
+func TestStatsTokenMissingUsageDoesNotAccumulate(t *testing.T) {
+	stats := GetGlobalStats()
+	providerName := "codex-usage-missing"
+	before := stats.Snapshot()[providerName]
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "resp_1",
+			"type":        "response",
+			"model":       "gpt-5-codex",
+			"stop_reason": "stop",
+			"output": []any{
+				map[string]any{
+					"type": "message",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": "hello"},
+					},
+				},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: providerName},
+		Providers: []config.ProviderConfig{{
+			Name:             providerName,
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":false,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	after := stats.Snapshot()[providerName]
+	if got := after.PromptTokens - before.PromptTokens; got != 0 {
+		t.Fatalf("prompt token should not change when usage missing, got delta=%d", got)
+	}
+	if got := after.CompletionTokens - before.CompletionTokens; got != 0 {
+		t.Fatalf("completion token should not change when usage missing, got delta=%d", got)
+	}
+}
+
+func TestStatsTokenParsesStringUsageValues(t *testing.T) {
+	stats := GetGlobalStats()
+	providerName := "codex-usage-string"
+	before := stats.Snapshot()[providerName]
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "resp_1",
+			"type":        "response",
+			"model":       "gpt-5-codex",
+			"stop_reason": "stop",
+			"usage": map[string]any{
+				"input_tokens":  "12",
+				"output_tokens": "3",
+			},
+			"output": []any{
+				map[string]any{
+					"type": "message",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": "hello"},
+					},
+				},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: providerName},
+		Providers: []config.ProviderConfig{{
+			Name:             providerName,
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":false,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	after := stats.Snapshot()[providerName]
+	if got := after.PromptTokens - before.PromptTokens; got != 12 {
+		t.Fatalf("prompt token delta mismatch for string usage: got=%d want=12", got)
+	}
+	if got := after.CompletionTokens - before.CompletionTokens; got != 3 {
+		t.Fatalf("completion token delta mismatch for string usage: got=%d want=3", got)
+	}
+}
+
+func TestStatsTokenMalformedUsageDoesNotPanicOrAccumulate(t *testing.T) {
+	stats := GetGlobalStats()
+	providerName := "codex-usage-malformed"
+	before := stats.Snapshot()[providerName]
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          "resp_1",
+			"type":        "response",
+			"model":       "gpt-5-codex",
+			"stop_reason": "stop",
+			"usage":       "bad-usage-structure",
+			"output": []any{
+				map[string]any{
+					"type": "message",
+					"content": []any{
+						map[string]any{"type": "output_text", "text": "hello"},
+					},
+				},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: providerName},
+		Providers: []config.ProviderConfig{{
+			Name:             providerName,
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":false,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	after := stats.Snapshot()[providerName]
+	if got := after.PromptTokens - before.PromptTokens; got != 0 {
+		t.Fatalf("prompt token should not change when usage malformed, got delta=%d", got)
+	}
+	if got := after.CompletionTokens - before.CompletionTokens; got != 0 {
+		t.Fatalf("completion token should not change when usage malformed, got delta=%d", got)
+	}
+}
+
+func TestStatsTokenParsesStringUsageValuesInStream(t *testing.T) {
+	stats := GetGlobalStats()
+	providerName := "codex-usage-stream-string"
+	before := stats.Snapshot()[providerName]
+	allowComplete := make(chan struct{})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5-codex\"}}\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-allowComplete
+		stream := strings.Join([]string{
+			`data: {"type":"response.output_text.delta","delta":"hello"}`,
+			"",
+			`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":"13","output_tokens":"8"}}}`,
+			"",
+		}, "\n")
+		_, _ = io.WriteString(w, stream)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: providerName},
+		Providers: []config.ProviderConfig{{
+			Name:             providerName,
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"stream":true,
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	probe := newStreamProbeResponseWriter()
+
+	done := make(chan struct{})
+	go func() {
+		server.Handler().ServeHTTP(probe, req)
+		close(done)
+	}()
+
+	select {
+	case <-probe.firstWriteCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting first downstream write")
+	}
+
+	close(allowComplete)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting stream response finish")
+	}
+
+	after := stats.Snapshot()[providerName]
+	if got := after.PromptTokens - before.PromptTokens; got != 13 {
+		t.Fatalf("prompt token delta mismatch for stream string usage: got=%d want=13", got)
+	}
+	if got := after.CompletionTokens - before.CompletionTokens; got != 8 {
+		t.Fatalf("completion token delta mismatch for stream string usage: got=%d want=8", got)
+	}
 }
 
 func TestProxyAuthToken(t *testing.T) {
