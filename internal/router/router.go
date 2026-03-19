@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
-)// SelectionInput describes the attributes used to select an upstream provider.
+) // SelectionInput describes the attributes used to select an upstream provider.
 type SelectionInput struct {
 	Path              string
 	Model             string
@@ -72,7 +72,6 @@ func NewSelector(routerCfg config.RouterConfig, providers []config.ProviderConfi
 	// 注入熔断器检查函数 (用于过滤不可用的节点)
 	// 此处为解耦设计，我们不再直接在 router 里加锁读取 proxy.Stats
 	// 这部分逻辑将主要放到 Select 时结合外部传进来的 excluded() 实现。
-
 
 	if len(s.allProviderNames) == 0 {
 		return nil, errors.New("selector has no enabled providers")
