@@ -53,8 +53,12 @@ type ServerConfig struct {
 
 // CircuitBreakerConfig controls provider circuit breaker behavior.
 type CircuitBreakerConfig struct {
-	Threshold    int           `yaml:"threshold"`
-	OpenDuration time.Duration `yaml:"open_duration"`
+	Threshold            int           `yaml:"threshold"`
+	OpenDuration         time.Duration `yaml:"open_duration"`
+	WindowSize           int           `yaml:"window_size"`
+	MinSamples           int           `yaml:"min_samples"`
+	FailureRateThreshold float64       `yaml:"failure_rate_threshold"`
+	LatencyThreshold     time.Duration `yaml:"latency_threshold"`
 }
 
 // RetryConfig controls upstream request retry behavior.
@@ -182,11 +186,20 @@ func applyDefaults(cfg *Config) {
 		cfg.Server.Retry.MaxAttempts = 3
 	}
 
-	// 熔断默认值：仅当整个配置块为空（两个字段都为零值）时才填充，
-	// 若用户显式配置了其中任意一个字段，则交由 validate 做合法性校验。
+	// 熔断默认值：threshold/open_duration 仅当传统熔断字段都为空时填充。
+	// 评分熔断字段为新增能力：当全部缺省时填充整组默认值，以兼容旧配置。
 	if cfg.Server.CircuitBreaker.Threshold == 0 && cfg.Server.CircuitBreaker.OpenDuration == 0 {
 		cfg.Server.CircuitBreaker.Threshold = 3
 		cfg.Server.CircuitBreaker.OpenDuration = 120 * time.Second
+	}
+	if cfg.Server.CircuitBreaker.WindowSize == 0 &&
+		cfg.Server.CircuitBreaker.MinSamples == 0 &&
+		cfg.Server.CircuitBreaker.FailureRateThreshold == 0 &&
+		cfg.Server.CircuitBreaker.LatencyThreshold == 0 {
+		cfg.Server.CircuitBreaker.WindowSize = 20
+		cfg.Server.CircuitBreaker.MinSamples = 10
+		cfg.Server.CircuitBreaker.FailureRateThreshold = 0.5
+		cfg.Server.CircuitBreaker.LatencyThreshold = 5 * time.Second
 	}
 
 	if cfg.Router.Strategy == "" {
@@ -248,6 +261,21 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Server.CircuitBreaker.OpenDuration <= 0 {
 		return errors.New("server.circuit_breaker.open_duration must be greater than 0")
+	}
+	if cfg.Server.CircuitBreaker.WindowSize <= 0 {
+		return errors.New("server.circuit_breaker.window_size must be greater than 0")
+	}
+	if cfg.Server.CircuitBreaker.MinSamples <= 0 {
+		return errors.New("server.circuit_breaker.min_samples must be greater than 0")
+	}
+	if cfg.Server.CircuitBreaker.MinSamples > cfg.Server.CircuitBreaker.WindowSize {
+		return errors.New("server.circuit_breaker.min_samples must be less than or equal to window_size")
+	}
+	if cfg.Server.CircuitBreaker.FailureRateThreshold <= 0 || cfg.Server.CircuitBreaker.FailureRateThreshold > 1 {
+		return errors.New("server.circuit_breaker.failure_rate_threshold must be within (0, 1]")
+	}
+	if cfg.Server.CircuitBreaker.LatencyThreshold <= 0 {
+		return errors.New("server.circuit_breaker.latency_threshold must be greater than 0")
 	}
 
 	if len(cfg.Providers) == 0 {

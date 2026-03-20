@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
 )
@@ -110,6 +111,47 @@ func TestHandleStatusResetClearsStatsForLoopback(t *testing.T) {
 	}
 	if ps.CircuitOpenUntil != 123456789 {
 		t.Fatalf("expected CircuitOpenUntil to be preserved, got %d", ps.CircuitOpenUntil)
+	}
+}
+
+func TestHandleStatusResetClearsHealthWindow(t *testing.T) {
+	t.Parallel()
+
+	s, err := NewServer(config.Config{
+		Router: config.RouterConfig{
+			Strategy: "round_robin",
+		},
+		Providers: []config.ProviderConfig{
+			{Name: "p1", BaseURL: "https://example.com"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	ps := s.stats.GetOrCreate("p1")
+	window := ps.EnsureHealthWindow(4)
+	window.record(100*time.Millisecond, true)
+	window.record(100*time.Millisecond, true)
+
+	if enough, samples, failureRate, _ := window.snapshot(1); !enough || samples != 2 || failureRate != 1 {
+		t.Fatalf("expected seeded window state, got enough=%v samples=%d failureRate=%v", enough, samples, failureRate)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/internal/status/reset", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if ps.HealthWindow == nil {
+		t.Fatal("expected health window to remain initialized after reset")
+	}
+	if enough, samples, failureRate, avg := ps.HealthWindow.snapshot(1); enough || samples != 0 || failureRate != 0 || avg != 0 {
+		t.Fatalf("expected cleared health window, got enough=%v samples=%d failureRate=%v avg=%s", enough, samples, failureRate, avg)
 	}
 }
 

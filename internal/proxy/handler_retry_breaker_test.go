@@ -206,8 +206,187 @@ func TestRetryDisabled(t *testing.T) {
 	}
 }
 
+func TestCircuitBreakerTripsWhenFailureRateTooHigh(t *testing.T) {
+	providerName := "cb-score-failure"
+	fallbackName := "cb-score-fallback"
+
+	upstreamA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "fatal error", http.StatusServiceUnavailable)
+	}))
+	defer upstreamA.Close()
+
+	upstreamB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+	}))
+	defer upstreamB.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+			CircuitBreaker: config.CircuitBreakerConfig{
+				Threshold:            99,
+				OpenDuration:         60 * time.Second,
+				WindowSize:           4,
+				MinSamples:           4,
+				FailureRateThreshold: 0.5,
+				LatencyThreshold:     30 * time.Second,
+			},
+			Retry: config.RetryConfig{
+				MaxAttempts:    1,
+				RetryOn5xx:     boolPtr(false),
+				RetryOnNetwork: boolPtr(false),
+			},
+		},
+		Router: config.RouterConfig{
+			Strategy:        "round_robin",
+			DefaultProvider: providerName,
+		},
+		Providers: []config.ProviderConfig{{
+			Name:    providerName,
+			BaseURL: upstreamA.URL,
+		}, {
+			Name:    fallbackName,
+			BaseURL: upstreamB.URL,
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	stats := server.stats
+
+	handler := server.Handler()
+	for i := 0; i < 4; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+	}
+
+	view := stats.Snapshot()[providerName]
+	if view.CircuitOpenUntil == 0 {
+		t.Fatalf("expected provider to trip on failure rate, got open_until=0")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Header().Get("X-Selected-Provider") != fallbackName {
+		t.Fatalf("expected fallback provider after score breaker trip, got %q", rr.Header().Get("X-Selected-Provider"))
+	}
+}
+
+func TestCircuitBreakerTripsWhenLatencyTooHigh(t *testing.T) {
+	providerName := "cb-score-latency"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+			CircuitBreaker: config.CircuitBreakerConfig{
+				Threshold:            99,
+				OpenDuration:         60 * time.Second,
+				WindowSize:           3,
+				MinSamples:           3,
+				FailureRateThreshold: 1,
+				LatencyThreshold:     10 * time.Millisecond,
+			},
+			Retry: config.RetryConfig{
+				MaxAttempts:    1,
+				RetryOn5xx:     boolPtr(false),
+				RetryOnNetwork: boolPtr(false),
+			},
+		},
+		Router: config.RouterConfig{
+			Strategy:        "round_robin",
+			DefaultProvider: providerName,
+		},
+		Providers: []config.ProviderConfig{{
+			Name:    providerName,
+			BaseURL: upstream.URL,
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	stats := server.stats
+
+	handler := server.Handler()
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+	}
+
+	view := stats.Snapshot()[providerName]
+	if view.CircuitOpenUntil == 0 {
+		t.Fatalf("expected provider to trip on latency, got open_until=0")
+	}
+}
+
+func TestCircuitBreakerDoesNotTripBeforeMinSamples(t *testing.T) {
+	providerName := "cb-score-min-samples"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "fatal error", http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+			CircuitBreaker: config.CircuitBreakerConfig{
+				Threshold:            99,
+				OpenDuration:         60 * time.Second,
+				WindowSize:           4,
+				MinSamples:           4,
+				FailureRateThreshold: 0.25,
+				LatencyThreshold:     30 * time.Second,
+			},
+			Retry: config.RetryConfig{
+				MaxAttempts:    1,
+				RetryOn5xx:     boolPtr(false),
+				RetryOnNetwork: boolPtr(false),
+			},
+		},
+		Router: config.RouterConfig{
+			Strategy:        "round_robin",
+			DefaultProvider: providerName,
+		},
+		Providers: []config.ProviderConfig{{
+			Name:    providerName,
+			BaseURL: upstream.URL,
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	stats := server.stats
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	view := stats.Snapshot()[providerName]
+	if view.CircuitOpenUntil != 0 {
+		t.Fatalf("expected provider to stay closed before min samples, got %d", view.CircuitOpenUntil)
+	}
+}
+
 func TestCircuitBreakerUsesConfiguredThreshold(t *testing.T) {
-	stats := GetGlobalStats()
 	providerName := "cb-config-threshold"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -219,8 +398,12 @@ func TestCircuitBreakerUsesConfiguredThreshold(t *testing.T) {
 		Server: config.ServerConfig{
 			UpstreamTimeout: 30 * time.Second,
 			CircuitBreaker: config.CircuitBreakerConfig{
-				Threshold:    2,
-				OpenDuration: 60 * time.Second,
+				Threshold:            99,
+				OpenDuration:         60 * time.Second,
+				WindowSize:           2,
+				MinSamples:           2,
+				FailureRateThreshold: 1,
+				LatencyThreshold:     30 * time.Second,
 			},
 			Retry: config.RetryConfig{
 				MaxAttempts:    1,
@@ -242,9 +425,9 @@ func TestCircuitBreakerUsesConfiguredThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	stats := server.stats
 
 	handler := server.Handler()
-
 	for i := 0; i < 2; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
 		req.Header.Set("Content-Type", "application/json")
@@ -254,7 +437,7 @@ func TestCircuitBreakerUsesConfiguredThreshold(t *testing.T) {
 
 	view := stats.Snapshot()[providerName]
 	if view.CircuitOpenUntil == 0 {
-		t.Fatalf("expected circuit breaker to be open after 2 fatal errors, got 0")
+		t.Fatalf("expected circuit breaker to be open after reaching configured scoring threshold, got 0")
 	}
 	if view.CircuitOpenUntil <= time.Now().Unix() {
 		t.Fatalf("expected circuit to remain open in the future, got %d", view.CircuitOpenUntil)
@@ -262,7 +445,6 @@ func TestCircuitBreakerUsesConfiguredThreshold(t *testing.T) {
 }
 
 func TestCircuitBreakerUsesConfiguredOpenDuration(t *testing.T) {
-	stats := GetGlobalStats()
 	providerName := "cb-config-open-duration"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -274,8 +456,12 @@ func TestCircuitBreakerUsesConfiguredOpenDuration(t *testing.T) {
 		Server: config.ServerConfig{
 			UpstreamTimeout: 30 * time.Second,
 			CircuitBreaker: config.CircuitBreakerConfig{
-				Threshold:    1,
-				OpenDuration: 10 * time.Second,
+				Threshold:            99,
+				OpenDuration:         10 * time.Second,
+				WindowSize:           1,
+				MinSamples:           1,
+				FailureRateThreshold: 1,
+				LatencyThreshold:     30 * time.Second,
 			},
 			Retry: config.RetryConfig{
 				MaxAttempts:    1,
@@ -297,6 +483,7 @@ func TestCircuitBreakerUsesConfiguredOpenDuration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	stats := server.stats
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -305,12 +492,89 @@ func TestCircuitBreakerUsesConfiguredOpenDuration(t *testing.T) {
 
 	view := stats.Snapshot()[providerName]
 	if view.CircuitOpenUntil == 0 {
-		t.Fatalf("expected circuit to open after fatal error, got 0")
+		t.Fatalf("expected circuit to open after scoring breaker trigger, got 0")
 	}
 	now := time.Now().Unix()
 	delta := view.CircuitOpenUntil - now
 	if delta < 8 || delta > 12 {
 		t.Fatalf("expected circuit open duration around 10s, got delta=%d (open_until=%d now=%d)", delta, view.CircuitOpenUntil, now)
+	}
+}
+
+func TestCircuitBreakerRecoveryDoesNotImmediatelyRetripFromStaleWindow(t *testing.T) {
+	providerName := "cb-recovery"
+	var shouldFail atomic.Bool
+	shouldFail.Store(true)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if shouldFail.Load() {
+			http.Error(w, "fatal error", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+			CircuitBreaker: config.CircuitBreakerConfig{
+				Threshold:            99,
+				OpenDuration:         1 * time.Second,
+				WindowSize:           4,
+				MinSamples:           4,
+				FailureRateThreshold: 0.5,
+				LatencyThreshold:     30 * time.Second,
+			},
+			Retry: config.RetryConfig{
+				MaxAttempts:    1,
+				RetryOn5xx:     boolPtr(false),
+				RetryOnNetwork: boolPtr(false),
+			},
+		},
+		Router: config.RouterConfig{
+			Strategy:        "round_robin",
+			DefaultProvider: providerName,
+		},
+		Providers: []config.ProviderConfig{{
+			Name:    providerName,
+			BaseURL: upstream.URL,
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	stats := server.stats
+	handler := server.Handler()
+
+	for i := 0; i < 4; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+	}
+
+	view := stats.Snapshot()[providerName]
+	if view.CircuitOpenUntil == 0 {
+		t.Fatalf("expected provider to trip before recovery test")
+	}
+
+	shouldFail.Store(false)
+	time.Sleep(1100 * time.Millisecond)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected recovery request to succeed, got status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	view = stats.Snapshot()[providerName]
+	if view.CircuitOpenUntil > time.Now().Unix() {
+		t.Fatalf("expected provider to stay closed after recovery success, got open_until=%d", view.CircuitOpenUntil)
 	}
 }
 

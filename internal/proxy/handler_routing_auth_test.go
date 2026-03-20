@@ -16,9 +16,6 @@ import (
 )
 
 func TestProxyRouting(t *testing.T) {
-	stats := GetGlobalStats()
-	promptBefore := stats.Snapshot()["codex"].PromptTokens
-	completionBefore := stats.Snapshot()["codex"].CompletionTokens
 
 	upstreamA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -89,6 +86,9 @@ func TestProxyRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	stats := server.stats
+	promptBefore := stats.Snapshot()["codex"].PromptTokens
+	completionBefore := stats.Snapshot()["codex"].CompletionTokens
 
 	handler := server.Handler()
 

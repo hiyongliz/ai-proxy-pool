@@ -34,7 +34,8 @@ func reloadConfig(
 
 	warnRestartRequiredServerChanges(*cfg, newCfg)
 
-	newServer, err := proxy.NewServer(newCfg)
+	stats := proxy.GetGlobalStats()
+	newServer, err := proxy.NewServerWithStats(newCfg, stats)
 	if err != nil {
 		metrics.ConfigReloadsTotal.WithLabelValues("failure").Inc()
 		slog.Error("server rebuild failed, keeping current config", "error", err)

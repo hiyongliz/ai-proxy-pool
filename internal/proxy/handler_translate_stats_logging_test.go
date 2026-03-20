@@ -15,9 +15,7 @@ import (
 )
 
 func TestStatsTokenUseRealUsageForTranslatedNonStream(t *testing.T) {
-	stats := GetGlobalStats()
 	providerName := "codex-usage-nonstream"
-	before := stats.Snapshot()[providerName]
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -58,6 +56,8 @@ func TestStatsTokenUseRealUsageForTranslatedNonStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	stats := server.stats
+	before := stats.Snapshot()[providerName]
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
 		"model":"gpt-5-codex",
@@ -128,9 +128,7 @@ func (w *streamProbeResponseWriter) BodyString() string {
 }
 
 func TestStatsTokenUseRealUsageForTranslatedStream(t *testing.T) {
-	stats := GetGlobalStats()
 	providerName := "codex-usage-stream"
-	before := stats.Snapshot()[providerName]
 	firstChunkSent := make(chan struct{}, 1)
 	allowComplete := make(chan struct{})
 
@@ -171,6 +169,8 @@ func TestStatsTokenUseRealUsageForTranslatedStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	stats := server.stats
+	before := stats.Snapshot()[providerName]
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
 		"model":"gpt-5-codex",
@@ -225,9 +225,7 @@ func TestStatsTokenUseRealUsageForTranslatedStream(t *testing.T) {
 }
 
 func TestStatsTokenMissingUsageDoesNotAccumulate(t *testing.T) {
-	stats := GetGlobalStats()
 	providerName := "codex-usage-missing"
-	before := stats.Snapshot()[providerName]
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -264,6 +262,8 @@ func TestStatsTokenMissingUsageDoesNotAccumulate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	stats := server.stats
+	before := stats.Snapshot()[providerName]
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
 		"model":"gpt-5-codex",
@@ -288,9 +288,7 @@ func TestStatsTokenMissingUsageDoesNotAccumulate(t *testing.T) {
 }
 
 func TestStatsTokenParsesStringUsageValues(t *testing.T) {
-	stats := GetGlobalStats()
 	providerName := "codex-usage-string"
-	before := stats.Snapshot()[providerName]
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -331,6 +329,8 @@ func TestStatsTokenParsesStringUsageValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	stats := server.stats
+	before := stats.Snapshot()[providerName]
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
 		"model":"gpt-5-codex",
@@ -355,9 +355,7 @@ func TestStatsTokenParsesStringUsageValues(t *testing.T) {
 }
 
 func TestStatsTokenMalformedUsageDoesNotPanicOrAccumulate(t *testing.T) {
-	stats := GetGlobalStats()
 	providerName := "codex-usage-malformed"
-	before := stats.Snapshot()[providerName]
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -395,6 +393,8 @@ func TestStatsTokenMalformedUsageDoesNotPanicOrAccumulate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	stats := server.stats
+	before := stats.Snapshot()[providerName]
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
 		"model":"gpt-5-codex",
@@ -419,9 +419,7 @@ func TestStatsTokenMalformedUsageDoesNotPanicOrAccumulate(t *testing.T) {
 }
 
 func TestStatsTokenParsesStringUsageValuesInStream(t *testing.T) {
-	stats := GetGlobalStats()
 	providerName := "codex-usage-stream-string"
-	before := stats.Snapshot()[providerName]
 	allowComplete := make(chan struct{})
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -457,6 +455,8 @@ func TestStatsTokenParsesStringUsageValuesInStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	stats := server.stats
+	before := stats.Snapshot()[providerName]
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
 		"model":"gpt-5-codex",

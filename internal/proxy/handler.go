@@ -37,8 +37,16 @@ type Server struct {
 
 // NewServer creates a proxy server from configuration.
 func NewServer(cfg config.Config) (*Server, error) {
+	return NewServerWithStats(cfg, &GlobalStats{})
+}
+
+// NewServerWithStats creates a proxy server with the provided stats store.
+func NewServerWithStats(cfg config.Config, stats *GlobalStats) (*Server, error) {
 	if cfg.Server.MaxRequestBodyBytes <= 0 {
 		cfg.Server.MaxRequestBodyBytes = defaultMaxRequestBodyBytes
+	}
+	if stats == nil {
+		stats = &GlobalStats{}
 	}
 
 	selector, err := router.NewSelector(cfg.Router, cfg.Providers)
@@ -72,7 +80,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 		cfg:      cfg,
 		selector: selector,
 		clients:  clients,
-		stats:    defaultStats,
+		stats:    stats,
 	}
 	server.handler = server.buildHandler()
 	return server, nil
@@ -134,7 +142,6 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cbCfg := s.cfg.Server.CircuitBreaker
-	threshold := cbCfg.Threshold
 	openDuration := cbCfg.OpenDuration
 
 	var excludedProviders []string
@@ -169,28 +176,40 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 
 		pStats := s.stats.GetOrCreate(selected.Name)
+		pStats.EnsureHealthWindow(cbCfg.WindowSize)
 		atomic.AddInt64(&pStats.ActiveConnections, 1)
 
+		requestStart := time.Now()
 		statusCode, upstreamErr := s.doUpstreamRequest(w, r, body, model, selected, attempt, maxAttempts)
+		requestDuration := time.Since(requestStart)
 
 		atomic.AddInt64(&pStats.ActiveConnections, -1)
 		atomic.AddInt64(&pStats.TotalRequests, 1)
 
-		// 先根据状态码/错误更新熔断计数
-		if isProviderFatalError(statusCode, upstreamErr) {
-			fails := atomic.AddInt32(&pStats.ConsecutiveErrors, 1)
-			if threshold > 0 && openDuration > 0 && fails >= int32(threshold) {
+		fatal := isProviderFatalError(statusCode, upstreamErr)
+		if pStats.HealthWindow != nil {
+			pStats.HealthWindow.record(requestDuration, fatal)
+			enough, samples, failureRate, avgDuration := pStats.HealthWindow.snapshot(cbCfg.MinSamples)
+			if enough && openDuration > 0 && (failureRate >= cbCfg.FailureRateThreshold || avgDuration >= cbCfg.LatencyThreshold) {
 				openUntil := time.Now().Add(openDuration).Unix()
-				// 触发熔断：隔离
 				atomic.StoreInt64(&pStats.CircuitOpenUntil, openUntil)
-				slog.Warn("provider circuit breaker triggered",
+				pStats.ResetHealthWindow(cbCfg.WindowSize)
+				slog.Warn("provider score circuit breaker triggered",
 					"provider", selected.Name,
-					"threshold", threshold,
+					"sample_count", samples,
+					"failure_rate", failureRate,
+					"failure_rate_threshold", cbCfg.FailureRateThreshold,
+					"avg_duration_ms", avgDuration.Milliseconds(),
+					"latency_threshold", cbCfg.LatencyThreshold.String(),
 					"open_duration", openDuration.String(),
 				)
 			}
+		}
+
+		// 保留连续错误计数字段仅做兼容状态，不再用于触发熔断。
+		if fatal {
+			atomic.AddInt32(&pStats.ConsecutiveErrors, 1)
 		} else {
-			// 非致命错误（比如 400 Bad Request），以及成功的 2xx/3xx，清零错误池
 			atomic.StoreInt32(&pStats.ConsecutiveErrors, 0)
 		}
 

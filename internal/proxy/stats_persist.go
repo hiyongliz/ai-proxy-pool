@@ -71,6 +71,8 @@ func (g *GlobalStats) LoadFromDisk() {
 		atomic.StoreInt64(&ps.TotalBytes, view.TotalBytes)
 		atomic.StoreInt64(&ps.PromptTokens, view.PromptTokens)
 		atomic.StoreInt64(&ps.CompletionTokens, view.CompletionTokens)
+		atomic.StoreInt64(&ps.CircuitOpenUntil, view.CircuitOpenUntil)
+		atomic.StoreInt32(&ps.ConsecutiveErrors, view.ConsecutiveErrors)
 	}
 
 	slog.Info("loaded persistent stats", "path", path, "providers_count", len(snap))

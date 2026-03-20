@@ -115,9 +115,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config failed: path=%s, %w", cfgPath, err)
 	}
 
-	proxy.GetGlobalStats().LoadFromDisk()
+	stats := proxy.GetGlobalStats()
+	stats.LoadFromDisk()
 
-	server, err := proxy.NewServer(cfg)
+	server, err := proxy.NewServerWithStats(cfg, stats)
 	if err != nil {
 		return fmt.Errorf("build proxy server failed: %w", err)
 	}
@@ -193,7 +194,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	defer ticker.Stop()
 	go func() {
 		for range ticker.C {
-			proxy.GetGlobalStats().Persist()
+			stats.Persist()
 		}
 	}()
 
@@ -214,7 +215,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 
 	// 退出前最后一次强制落盘
-	proxy.GetGlobalStats().Persist()
+	stats.Persist()
 
 	slog.Info("proxy server stopped")
 	return nil

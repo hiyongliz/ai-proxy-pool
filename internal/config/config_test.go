@@ -44,6 +44,18 @@ providers:
 	if cfg.Server.CircuitBreaker.OpenDuration != 120*time.Second {
 		t.Fatalf("unexpected circuit breaker open duration: got=%s", cfg.Server.CircuitBreaker.OpenDuration)
 	}
+	if cfg.Server.CircuitBreaker.WindowSize != 20 {
+		t.Fatalf("unexpected circuit breaker window size: got=%d", cfg.Server.CircuitBreaker.WindowSize)
+	}
+	if cfg.Server.CircuitBreaker.MinSamples != 10 {
+		t.Fatalf("unexpected circuit breaker min samples: got=%d", cfg.Server.CircuitBreaker.MinSamples)
+	}
+	if cfg.Server.CircuitBreaker.FailureRateThreshold != 0.5 {
+		t.Fatalf("unexpected circuit breaker failure rate threshold: got=%v", cfg.Server.CircuitBreaker.FailureRateThreshold)
+	}
+	if cfg.Server.CircuitBreaker.LatencyThreshold != 5*time.Second {
+		t.Fatalf("unexpected circuit breaker latency threshold: got=%s", cfg.Server.CircuitBreaker.LatencyThreshold)
+	}
 }
 
 func TestLoadRejectsNonPositiveMaxRequestBodyBytes(t *testing.T) {
@@ -82,6 +94,10 @@ server:
   circuit_breaker:
     threshold: 0
     open_duration: 120s
+    window_size: 20
+    min_samples: 10
+    failure_rate_threshold: 0.5
+    latency_threshold: 5s
 router: {}
 providers:
   - name: "p1"
@@ -96,12 +112,88 @@ server:
   circuit_breaker:
     threshold: 3
     open_duration: 0s
+    window_size: 20
+    min_samples: 10
+    failure_rate_threshold: 0.5
+    latency_threshold: 5s
 router: {}
 providers:
   - name: "p1"
     base_url: "https://example.com"
 `,
 			error: "server.circuit_breaker.open_duration",
+		},
+		{
+			name: "min samples exceeds window size",
+			yaml: `
+server:
+  circuit_breaker:
+    threshold: 3
+    open_duration: 120s
+    window_size: 5
+    min_samples: 6
+    failure_rate_threshold: 0.5
+    latency_threshold: 5s
+router: {}
+providers:
+  - name: "p1"
+    base_url: "https://example.com"
+`,
+			error: "server.circuit_breaker.min_samples",
+		},
+		{
+			name: "non-positive failure rate threshold",
+			yaml: `
+server:
+  circuit_breaker:
+    threshold: 3
+    open_duration: 120s
+    window_size: 20
+    min_samples: 10
+    failure_rate_threshold: 0
+    latency_threshold: 5s
+router: {}
+providers:
+  - name: "p1"
+    base_url: "https://example.com"
+`,
+			error: "server.circuit_breaker.failure_rate_threshold",
+		},
+		{
+			name: "failure rate threshold greater than one",
+			yaml: `
+server:
+  circuit_breaker:
+    threshold: 3
+    open_duration: 120s
+    window_size: 20
+    min_samples: 10
+    failure_rate_threshold: 1.1
+    latency_threshold: 5s
+router: {}
+providers:
+  - name: "p1"
+    base_url: "https://example.com"
+`,
+			error: "server.circuit_breaker.failure_rate_threshold",
+		},
+		{
+			name: "non-positive latency threshold",
+			yaml: `
+server:
+  circuit_breaker:
+    threshold: 3
+    open_duration: 120s
+    window_size: 20
+    min_samples: 10
+    failure_rate_threshold: 0.5
+    latency_threshold: 0s
+router: {}
+providers:
+  - name: "p1"
+    base_url: "https://example.com"
+`,
+			error: "server.circuit_breaker.latency_threshold",
 		},
 	}
 
@@ -127,6 +219,10 @@ server:
   circuit_breaker:
     threshold: 5
     open_duration: 30s
+    window_size: 8
+    min_samples: 4
+    failure_rate_threshold: 0.4
+    latency_threshold: 3s
 router: {}
 providers:
   - name: "p1"
@@ -143,6 +239,18 @@ providers:
 	}
 	if cfg.Server.CircuitBreaker.OpenDuration != 30*time.Second {
 		t.Fatalf("unexpected circuit breaker open duration: got=%s", cfg.Server.CircuitBreaker.OpenDuration)
+	}
+	if cfg.Server.CircuitBreaker.WindowSize != 8 {
+		t.Fatalf("unexpected circuit breaker window size: got=%d", cfg.Server.CircuitBreaker.WindowSize)
+	}
+	if cfg.Server.CircuitBreaker.MinSamples != 4 {
+		t.Fatalf("unexpected circuit breaker min samples: got=%d", cfg.Server.CircuitBreaker.MinSamples)
+	}
+	if cfg.Server.CircuitBreaker.FailureRateThreshold != 0.4 {
+		t.Fatalf("unexpected circuit breaker failure rate threshold: got=%v", cfg.Server.CircuitBreaker.FailureRateThreshold)
+	}
+	if cfg.Server.CircuitBreaker.LatencyThreshold != 3*time.Second {
+		t.Fatalf("unexpected circuit breaker latency threshold: got=%s", cfg.Server.CircuitBreaker.LatencyThreshold)
 	}
 }
 
