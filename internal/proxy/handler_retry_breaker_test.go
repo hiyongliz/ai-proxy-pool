@@ -73,6 +73,124 @@ func TestRetryOn5xx(t *testing.T) {
 	if rr.Header().Get("X-Selected-Provider") != "b" {
 		t.Fatalf("expected X-Selected-Provider=b, got %q", rr.Header().Get("X-Selected-Provider"))
 	}
+
+	stats := server.stats.Snapshot()
+	if got := stats["a"].TotalRequests; got != 1 {
+		t.Fatalf("provider A total requests: got %d want 1", got)
+	}
+	if got := stats["a"].ErrorRequests; got != 1 {
+		t.Fatalf("provider A error requests: got %d want 1", got)
+	}
+	if got := stats["a"].SuccessRequests; got != 0 {
+		t.Fatalf("provider A success requests: got %d want 0", got)
+	}
+	if got := stats["b"].TotalRequests; got != 1 {
+		t.Fatalf("provider B total requests: got %d want 1", got)
+	}
+	if got := stats["b"].ErrorRequests; got != 0 {
+		t.Fatalf("provider B error requests: got %d want 0", got)
+	}
+	if got := stats["b"].SuccessRequests; got != 1 {
+		t.Fatalf("provider B success requests: got %d want 1", got)
+	}
+}
+
+func TestPassthrough4xxCountsAsError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+			Retry: config.RetryConfig{
+				MaxAttempts:    1,
+				RetryOn5xx:     boolPtr(false),
+				RetryOnNetwork: boolPtr(false),
+			},
+		},
+		Router: config.RouterConfig{
+			Strategy: "round_robin",
+		},
+		Providers: []config.ProviderConfig{
+			{Name: "a", BaseURL: upstream.URL},
+		},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	stats := server.stats.Snapshot()
+	if got := stats["a"].TotalRequests; got != 1 {
+		t.Fatalf("provider total requests: got %d want 1", got)
+	}
+	if got := stats["a"].ErrorRequests; got != 1 {
+		t.Fatalf("provider error requests: got %d want 1", got)
+	}
+	if got := stats["a"].SuccessRequests; got != 0 {
+		t.Fatalf("provider success requests: got %d want 0", got)
+	}
+}
+
+func TestPassthrough5xxCountsAsErrorWhenRetryDisabled(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{
+			UpstreamTimeout: 30 * time.Second,
+			Retry: config.RetryConfig{
+				MaxAttempts:    1,
+				RetryOn5xx:     boolPtr(false),
+				RetryOnNetwork: boolPtr(false),
+			},
+		},
+		Router: config.RouterConfig{
+			Strategy: "round_robin",
+		},
+		Providers: []config.ProviderConfig{
+			{Name: "a", BaseURL: upstream.URL},
+		},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	stats := server.stats.Snapshot()
+	if got := stats["a"].TotalRequests; got != 1 {
+		t.Fatalf("provider total requests: got %d want 1", got)
+	}
+	if got := stats["a"].ErrorRequests; got != 1 {
+		t.Fatalf("provider error requests: got %d want 1", got)
+	}
+	if got := stats["a"].SuccessRequests; got != 0 {
+		t.Fatalf("provider success requests: got %d want 0", got)
+	}
 }
 
 func TestRetryAllProvidersExhausted(t *testing.T) {

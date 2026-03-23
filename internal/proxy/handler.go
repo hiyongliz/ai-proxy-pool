@@ -213,7 +213,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			atomic.StoreInt32(&pStats.ConsecutiveErrors, 0)
 		}
 
-		if upstreamErr == nil {
+		if upstreamErr == nil && isSuccessfulUpstreamStatus(statusCode) {
 			atomic.AddInt64(&pStats.SuccessRequests, 1)
 			return // 成功，直接返回
 		}
@@ -282,6 +282,10 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload map[string]string)
 	if err := encoder.Encode(payload); err != nil {
 		slog.Error("writeJSON encode failed", "error", err)
 	}
+}
+
+func isSuccessfulUpstreamStatus(statusCode int) bool {
+	return statusCode >= http.StatusOK && statusCode < http.StatusBadRequest
 }
 
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
