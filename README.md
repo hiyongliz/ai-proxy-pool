@@ -15,6 +15,8 @@ Go 实现的 Claude 多供应商智能代理服务。
 - 协议转换：支持 `claude_to_codex`（Claude 请求 → Codex 请求，Codex 响应 → Claude 响应）
 - 自动注入上游鉴权（`auth_token`/`bearer`/`x-api-key`）
 - 自动重试：5xx 错误或网络异常时自动切换到其他 provider
+- 评分熔断：按 provider 最近滑动窗口的失败率或平均延迟自动熔断
+- 熔断状态持久化：daemon 重启或热重载后继续复用 stats 与 breaker 状态
 - 热重载：配置文件修改后自动生效，无需重启
 - Prometheus 指标：`GET /metrics`
 - 后台守护进程模式（`appool start`）
@@ -95,7 +97,7 @@ appool start            # 后台守护进程启动
 appool stop             # 停止后台进程
 appool restart          # 重启后台进程
 appool status           # 查看 daemon 状态
-appool status reset     # 清理 daemon 内存中的状态统计（请求/错误/延迟/token 等）
+appool status reset     # 清理 daemon 内存中的状态统计与评分窗口（保留熔断状态）
 appool logs             # 查看并持续跟随日志输出（带颜色高亮）
 appool config           # 交互式选择并切换激活配置文件
 appool version          # 查看版本信息
@@ -130,10 +132,42 @@ appool version --json   # JSON 格式输出版本信息
 | `retry.max_attempts` | 最大重试次数（含首次） | `3` |
 | `retry.retry_on_5xx` | 5xx 响应时重试 | `true` |
 | `retry.retry_on_network` | 网络错误时重试 | `true` |
+| `circuit_breaker.threshold` | 兼容保留字段，需大于 0 才能通过校验，当前不参与评分熔断判定 | `3` |
+| `circuit_breaker.open_duration` | 熔断持续时间 | `120s` |
+| `circuit_breaker.window_size` | 评分滑动窗口长度 | `20` |
+| `circuit_breaker.min_samples` | 至少多少条样本后才开始按评分熔断 | `10` |
+| `circuit_breaker.failure_rate_threshold` | 失败率阈值，达到后触发熔断 | `0.5` |
+| `circuit_breaker.latency_threshold` | 平均延迟阈值，达到后触发熔断 | `5s` |
 
 说明：当 `auth.enabled=true` 时，入口会兼容两种认证头：
 - `Authorization: Bearer <token>`
 - `X-Api-Key: <token>`
+
+### 评分熔断（推荐）
+
+评分熔断按 **每个 provider 最近一段滑动窗口请求** 的健康度决定是否熔断，满足以下任一条件即打开熔断：
+- 失败率 `>= failure_rate_threshold`
+- 平均延迟 `>= latency_threshold`
+
+熔断打开后持续 `open_duration`，并在恢复后重置该 provider 的评分窗口，避免旧坏样本导致恢复后立即再次熔断。
+
+推荐配置：
+
+```yaml
+server:
+  circuit_breaker:
+    threshold: 3                 # 兼容保留，当前不参与评分熔断
+    open_duration: 120s
+    window_size: 20
+    min_samples: 10
+    failure_rate_threshold: 0.5
+    latency_threshold: 5s
+```
+
+调参建议：
+- 对稳定上游：可降低 `failure_rate_threshold`（如 `0.3`）以更激进保护；
+- 对偶发慢请求较多的上游：适当增大 `window_size` 与 `latency_threshold`；
+- `min_samples` 应小于等于 `window_size`，否则配置会被拒绝。
 
 ### Router
 
@@ -211,7 +245,8 @@ appool status reset
 ```
 
 - `appool status`：查看当前各 provider 的请求、错误、延迟和 token 等统计；
-- `appool status reset`：清理上述统计计数，不影响熔断状态。
+- `appool status reset`：清理上述统计计数与评分窗口，不影响已打开的熔断状态；
+- daemon 启动时会从 `~/.ai_proxy_pool/stats.json` 恢复持久化 stats；热重载也会复用同一份 stats，因此重载后不会丢失 breaker 状态。
 
 ### 停止后台进程
 
