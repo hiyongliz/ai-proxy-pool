@@ -471,6 +471,8 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 			w.Header().Del("Content-Encoding")
 			return resp.StatusCode, fmt.Errorf("read upstream body: %w", readErr)
 		}
+		w.Header().Del("Content-Length")
+		w.Header().Del("Content-Encoding")
 		w.WriteHeader(resp.StatusCode)
 		var n int
 		n, err = w.Write(rawBody)

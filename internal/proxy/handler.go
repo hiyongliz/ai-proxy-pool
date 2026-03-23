@@ -213,9 +213,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			atomic.StoreInt32(&pStats.ConsecutiveErrors, 0)
 		}
 
-		if upstreamErr == nil && isSuccessfulUpstreamStatus(statusCode) {
-			atomic.AddInt64(&pStats.SuccessRequests, 1)
-			return // 成功，直接返回
+		if upstreamErr == nil {
+			if isSuccessfulUpstreamStatus(statusCode) {
+				atomic.AddInt64(&pStats.SuccessRequests, 1)
+			} else {
+				atomic.AddInt64(&pStats.ErrorRequests, 1)
+			}
+			return
 		}
 
 		atomic.AddInt64(&pStats.ErrorRequests, 1)
