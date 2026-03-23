@@ -1063,6 +1063,186 @@ func TestNonTranslatedResponsePassthroughAfterSuccessfulRead(t *testing.T) {
 	}
 }
 
+func TestNonTranslated403PassthroughRemovesEncodingAndLength(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "zstd")
+		w.Header().Set("Content-Length", "21")
+		w.Header().Set("X-Upstream", "forbidden")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":"forbidden"}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != `{"error":"forbidden"}` {
+		t.Fatalf("expected exact upstream body, got=%s", rr.Body.String())
+	}
+
+	stats := server.stats.Snapshot()
+	if got := stats["p1"].ErrorRequests; got != 1 {
+		t.Fatalf("provider error requests: got %d want 1", got)
+	}
+	if got := stats["p1"].SuccessRequests; got != 0 {
+		t.Fatalf("provider success requests: got %d want 0", got)
+	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected Content-Encoding removed, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("expected Content-Length removed, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("expected application/json preserved, got %q", got)
+	}
+	if got := rr.Header().Get("X-Upstream"); got != "forbidden" {
+		t.Fatalf("expected upstream header preserved, got %q", got)
+	}
+}
+
+func TestNonTranslated200PassthroughRemovesEncodingAndLength(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "zstd")
+		w.Header().Set("Content-Length", "11")
+		w.Header().Set("X-Upstream", "ok")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != `{"ok":true}` {
+		t.Fatalf("expected passthrough body, got=%s", rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected Content-Encoding removed, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("expected Content-Length removed, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("expected application/json preserved, got %q", got)
+	}
+	if got := rr.Header().Get("X-Upstream"); got != "ok" {
+		t.Fatalf("expected upstream header preserved, got %q", got)
+	}
+}
+
+func TestNonTranslatedResponseWithAcceptEncodingStillRemovesEncodingAndLength(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "zstd")
+		w.Header().Set("Content-Length", "11")
+		w.Header().Set("X-Upstream", "ok")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip, zstd")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != `{"ok":true}` {
+		t.Fatalf("expected passthrough body, got=%s", rr.Body.String())
+	}
+	if got := rr.Header().Get("X-Upstream"); got != "ok" {
+		t.Fatalf("expected upstream header preserved, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected Content-Encoding removed, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("expected Content-Length removed, got %q", got)
+	}
+}
+
+func TestTrueStreamPassthroughRemainsStreamingBoundary(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"ok\":true}\n\n")
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
+		t.Fatalf("expected event stream content type, got %q", got)
+	}
+	if !strings.Contains(rr.Body.String(), `data: {"ok":true}`) {
+		t.Fatalf("expected stream passthrough body, got=%s", rr.Body.String())
+	}
+}
+
 func TestTranslatedResponseLogsMinimalHeaders(t *testing.T) {
 	var logged strings.Builder
 	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
