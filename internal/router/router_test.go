@@ -164,3 +164,50 @@ func TestSelectorExcludedProviders(t *testing.T) {
 		}
 	})
 }
+
+func TestSelectorRouteRulesRestrictAutomaticRouting(t *testing.T) {
+	t.Parallel()
+
+	providers := []config.ProviderConfig{
+		{
+			Name:       "p1",
+			BaseURL:    "https://p1.example.com",
+			Enabled:    boolPtr(true),
+			Weight:     1,
+			ModelRegex: "^claude-4",
+		},
+		{
+			Name:          "p2",
+			BaseURL:       "https://p2.example.com",
+			Enabled:       boolPtr(true),
+			Weight:        1,
+			ModelPrefixes: []string{"claude-4"},
+		},
+	}
+
+	selector, err := NewSelector(config.RouterConfig{
+		Strategy:        "round_robin",
+		DefaultProvider: "p1",
+		RouteRules: []config.RouteRule{
+			{
+				PathPrefix:  "/v1/messages",
+				ModelPrefix: "claude-4",
+				Providers:   []string{"p1"},
+			},
+		},
+	}, providers)
+	if err != nil {
+		t.Fatalf("new selector: %v", err)
+	}
+
+	t.Run("matched rules do not fall back to providers outside route rules", func(t *testing.T) {
+		_, err := selector.Select(SelectionInput{
+			Path:              "/v1/messages",
+			Model:             "claude-4-sonnet",
+			ExcludedProviders: []string{"p1"},
+		})
+		if err == nil {
+			t.Fatalf("expected error when matched route-rule providers are excluded")
+		}
+	})
+}

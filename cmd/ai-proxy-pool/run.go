@@ -115,8 +115,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config failed: path=%s, %w", cfgPath, err)
 	}
 
-	stats := proxy.GetGlobalStats()
-	stats.LoadFromDisk()
+	runtime := newDaemonRuntime(resolveStatsPath(cfgPath))
+	stats := &proxy.GlobalStats{}
+	stats.LoadFromDiskAt(runtime.StatsPath())
 
 	server, err := proxy.NewServerWithStats(cfg, stats)
 	if err != nil {
@@ -156,7 +157,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 								debounceTimer.Stop()
 							}
 							debounceTimer = time.AfterFunc(200*time.Millisecond, func() {
-								reloadConfig(cfgPath, &cfg, handler, "file_change")
+								reloadConfig(cfgPath, &cfg, runtime, handler, "file_change")
 							})
 						}
 					case err, ok := <-watcher.Errors:
@@ -194,13 +195,16 @@ func runServer(cmd *cobra.Command, args []string) error {
 	defer ticker.Stop()
 	go func() {
 		for range ticker.C {
-			stats.Persist()
+			current := handler.Current()
+			if current != nil {
+				current.Stats().PersistTo(runtime.StatsPath())
+			}
 		}
 	}()
 
 	for sig := range done {
 		if sig == syscall.SIGHUP {
-			reloadConfig(cfgPath, &cfg, handler, "SIGHUP")
+			reloadConfig(cfgPath, &cfg, runtime, handler, "SIGHUP")
 			continue
 		}
 		// SIGINT or SIGTERM
@@ -215,7 +219,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 
 	// 退出前最后一次强制落盘
-	stats.Persist()
+	if current := handler.Current(); current != nil {
+		current.Stats().PersistTo(runtime.StatsPath())
+	}
 
 	slog.Info("proxy server stopped")
 	return nil

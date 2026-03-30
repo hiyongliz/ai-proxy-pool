@@ -18,11 +18,16 @@ func resolveStatsPath() string {
 	return filepath.Join(home, ".ai_proxy_pool", "stats.json")
 }
 
-// Persist dumps the current global stats to a JSON file.
+// Persist dumps the current global stats to the legacy default JSON file.
+// Prefer PersistTo(path) in runtime code so the caller controls the stats bucket.
 func (g *GlobalStats) Persist() {
-	path := resolveStatsPath()
+	g.PersistTo(resolveStatsPath())
+}
+
+// PersistTo dumps the current global stats to the provided JSON file.
+func (g *GlobalStats) PersistTo(path string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		slog.Error("failed to create stats directory", "error", err)
+		slog.Error("failed to create stats directory", "path", filepath.Dir(path), "error", err)
 		return
 	}
 
@@ -35,19 +40,60 @@ func (g *GlobalStats) Persist() {
 
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
-		slog.Error("failed to marshal stats to JSON", "error", err)
+		slog.Error("failed to marshal stats to JSON", "path", path, "error", err)
 		return
 	}
 
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := writeFileAtomically(path, data, 0o600); err != nil {
 		slog.Error("failed to write stats file", "path", path, "error", err)
 		return
 	}
 }
 
-// LoadFromDisk reads the stats JSON file and populates the counters.
+func writeFileAtomically(path string, data []byte, perm os.FileMode) (err error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			if closeErr := tmp.Close(); err == nil && closeErr != nil {
+				err = closeErr
+			}
+		}
+		if err != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmp.Chmod(perm); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	closed = true
+
+	return os.Rename(tmpPath, path)
+}
+
+// LoadFromDisk reads the legacy default stats JSON file and populates the counters.
+// Prefer LoadFromDiskAt(path) in runtime code so the caller controls the stats bucket.
 func (g *GlobalStats) LoadFromDisk() {
-	path := resolveStatsPath()
+	g.LoadFromDiskAt(resolveStatsPath())
+}
+
+// LoadFromDiskAt reads the provided stats JSON file and populates the counters.
+func (g *GlobalStats) LoadFromDiskAt(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,11 @@ import (
 	"syscall"
 	"time"
 )
+
+type pidFileRecord struct {
+	PID        int    `json:"pid"`
+	Executable string `json:"executable,omitempty"`
+}
 
 // daemonize forks a new process to run as a background daemon.
 func daemonize() {
@@ -37,19 +43,27 @@ func daemonize() {
 // stopDaemonAndWait sends SIGTERM to the daemon and waits for it to exit.
 func stopDaemonAndWait() (int, error) {
 	pidFile := pidPath()
-	data, err := os.ReadFile(pidFile)
+	record, err := readPIDRecord(pidFile)
 	if err != nil {
 		return 0, fmt.Errorf("read pid file: %w", err)
 	}
-
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return 0, fmt.Errorf("invalid pid: %w", err)
-	}
+	pid := record.PID
 
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return 0, fmt.Errorf("find process: %w", err)
+	}
+
+	matches, err := managedProcessMatches(record)
+	if err != nil {
+		if isProcessNotRunningError(err) {
+			_ = os.Remove(pidFile)
+			return 0, os.ErrNotExist
+		}
+		return 0, fmt.Errorf("inspect process: %w", err)
+	}
+	if !matches {
+		return 0, fmt.Errorf("pid file points to a different process, pid=%d", pid)
 	}
 
 	if err := process.Signal(syscall.SIGTERM); err != nil {
@@ -127,5 +141,104 @@ func writePID(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o644)
+	record := pidFileRecord{
+		PID:        os.Getpid(),
+		Executable: currentExecutablePath(),
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("marshal pid record: %w", err)
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func readPIDRecord(path string) (pidFileRecord, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return pidFileRecord{}, err
+	}
+
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return pidFileRecord{}, fmt.Errorf("empty pid file")
+	}
+
+	var record pidFileRecord
+	if err := json.Unmarshal([]byte(trimmed), &record); err == nil && record.PID > 0 {
+		return record, nil
+	}
+
+	pid, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return pidFileRecord{}, fmt.Errorf("invalid pid file contents: %w", err)
+	}
+
+	return pidFileRecord{PID: pid}, nil
+}
+
+func managedProcessMatches(record pidFileRecord) (bool, error) {
+	commandLine, err := processCommandLine(record.PID)
+	if err != nil {
+		return false, err
+	}
+
+	expectedExecutable := record.Executable
+	if expectedExecutable == "" {
+		expectedExecutable = currentExecutablePath()
+	}
+	if expectedExecutable == "" {
+		return true, nil
+	}
+
+	return executableMatchesCommandLine(expectedExecutable, commandLine), nil
+}
+
+func processCommandLine(pid int) (string, error) {
+	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", os.ErrProcessDone
+		}
+		return "", err
+	}
+	commandLine := strings.TrimSpace(string(out))
+	if commandLine == "" {
+		return "", os.ErrProcessDone
+	}
+	return commandLine, nil
+}
+
+func executableMatchesCommandLine(expectedExecutable, commandLine string) bool {
+	expectedExecutable = normalizeExecutablePath(expectedExecutable)
+	fields := strings.Fields(commandLine)
+	if len(fields) == 0 {
+		return false
+	}
+	runningExecutable := normalizeExecutablePath(fields[0])
+	if runningExecutable == expectedExecutable {
+		return true
+	}
+	return filepath.Base(runningExecutable) == filepath.Base(expectedExecutable)
+}
+
+func currentExecutablePath() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return normalizeExecutablePath(executable)
+}
+
+func normalizeExecutablePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return filepath.Clean(path)
 }

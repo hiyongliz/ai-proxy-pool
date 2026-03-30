@@ -17,6 +17,7 @@ var cfgMutex sync.Mutex
 func reloadConfig(
 	cfgPath string,
 	cfg *config.Config,
+	runtime *daemonRuntime,
 	handler *proxy.ReloadableHandler,
 	trigger string,
 ) {
@@ -34,7 +35,21 @@ func reloadConfig(
 
 	warnRestartRequiredServerChanges(*cfg, newCfg)
 
-	stats := proxy.GetGlobalStats()
+	newStatsPath := resolveStatsPath(cfgPath)
+	current := handler.Current()
+	var stats *proxy.GlobalStats
+	switch {
+	case current == nil:
+		stats = &proxy.GlobalStats{}
+		stats.LoadFromDiskAt(newStatsPath)
+	case runtime != nil && runtime.StatsPath() != "" && runtime.StatsPath() != newStatsPath:
+		current.Stats().PersistTo(runtime.StatsPath())
+		stats = &proxy.GlobalStats{}
+		stats.LoadFromDiskAt(newStatsPath)
+	default:
+		stats = current.Stats()
+	}
+
 	newServer, err := proxy.NewServerWithStats(newCfg, stats)
 	if err != nil {
 		metrics.ConfigReloadsTotal.WithLabelValues("failure").Inc()
@@ -44,6 +59,9 @@ func reloadConfig(
 
 	handler.Reload(newServer)
 	*cfg = newCfg
+	if runtime != nil {
+		runtime.SetStatsPath(newStatsPath)
+	}
 	metrics.ConfigReloadsTotal.WithLabelValues("success").Inc()
 	slog.Info("config reloaded successfully")
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -83,12 +84,12 @@ func runStatus(out io.Writer, watch bool) error {
 	defer signal.Stop(sigCh)
 
 	quitCh := make(chan struct{}, 1)
-	if file, ok := out.(*os.File); ok && term.IsTerminal(file.Fd()) {
-		state, err := term.MakeRaw(file.Fd())
+	if file, ok := out.(*os.File); ok && term.IsTerminal(file.Fd()) && term.IsTerminal(os.Stdin.Fd()) {
+		state, err := term.MakeRaw(os.Stdin.Fd())
 		if err == nil {
-			defer term.Restore(file.Fd(), state)
+			defer term.Restore(os.Stdin.Fd(), state)
 			out = &crlfWriter{w: out}
-			go watchQuitKey(file, quitCh)
+			go watchQuitKey(os.Stdin, quitCh)
 		}
 	}
 
@@ -161,7 +162,21 @@ func normalizeStatusAddr(addr string) string {
 	if strings.HasPrefix(addr, ":") {
 		return "127.0.0.1" + addr
 	}
-	return addr
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+
+	host = strings.Trim(host, "[]")
+	switch host {
+	case "", "0.0.0.0":
+		return net.JoinHostPort("127.0.0.1", port)
+	case "::":
+		return net.JoinHostPort("::1", port)
+	default:
+		return addr
+	}
 }
 
 func statusDashboardWidth(out io.Writer) int {

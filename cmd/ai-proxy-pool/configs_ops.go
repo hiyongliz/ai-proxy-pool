@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -128,15 +127,24 @@ type signalDaemonReloadResult struct {
 func signalDaemonReload() signalDaemonReloadResult {
 	result := signalDaemonReloadResult{}
 
-	data, err := os.ReadFile(pidPath())
+	record, err := readPIDRecord(pidPath())
 	if err != nil {
 		return result // daemon not running
 	}
 	result.daemonRunning = true
 
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		result.err = fmt.Errorf("invalid pid in file: %w", err)
+	pid := record.PID
+	matches, matchErr := managedProcessMatches(record)
+	if matchErr != nil {
+		if isProcessNotRunningError(matchErr) {
+			result.daemonRunning = false
+			return result
+		}
+		result.err = fmt.Errorf("inspect process: %w", matchErr)
+		return result
+	}
+	if !matches {
+		result.err = fmt.Errorf("pid file points to a different process, pid=%d", pid)
 		return result
 	}
 	result.pid = pid

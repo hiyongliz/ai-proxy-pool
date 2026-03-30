@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -13,6 +14,20 @@ import (
 
 	"github.com/hiyongliz/ai-proxy-pool/internal/config"
 )
+
+func gzipBytes(t *testing.T, body []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(body); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
+}
 
 func TestStatsTokenUseRealUsageForTranslatedNonStream(t *testing.T) {
 	providerName := "codex-usage-nonstream"
@@ -1208,6 +1223,42 @@ func TestNonTranslatedResponseWithAcceptEncodingStillRemovesEncodingAndLength(t 
 	}
 }
 
+func TestNonTranslatedGzipResponseWithAcceptEncodingIsDecodedBeforePassthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(gzipBytes(t, []byte(`{"ok":true}`)))
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip, br")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != `{"ok":true}` {
+		t.Fatalf("expected decoded passthrough body, got=%q", rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected Content-Encoding removed, got %q", got)
+	}
+}
+
 func TestTrueStreamPassthroughRemainsStreamingBoundary(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1305,6 +1356,65 @@ func TestTranslatedResponseLogsMinimalHeaders(t *testing.T) {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected %s in logs, got=%s", want, logs)
 		}
+	}
+}
+
+func TestTranslatedGzipResponseWithAcceptEncodingIsDecodedBeforeTranslation(t *testing.T) {
+	providerName := "codex-gzip"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(gzipBytes(t, []byte(`{
+			"id":"resp_1",
+			"type":"response",
+			"model":"gpt-5-codex",
+			"stop_reason":"stop",
+			"usage":{"input_tokens":3,"output_tokens":2},
+			"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+		}`)))
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server: config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router: config.RouterConfig{Strategy: "round_robin", DefaultProvider: providerName},
+		Providers: []config.ProviderConfig{{
+			Name:             providerName,
+			BaseURL:          upstream.URL,
+			TargetAPI:        "codex",
+			RequestTranslate: "claude_to_codex",
+			AuthType:         "none",
+		}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	before := server.stats.Snapshot()[providerName]
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{
+		"model":"gpt-5-codex",
+		"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip, br")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"type":"message"`) {
+		t.Fatalf("expected translated Claude response, got=%s", rr.Body.String())
+	}
+	after := server.stats.Snapshot()[providerName]
+	if got := after.PromptTokens - before.PromptTokens; got != 3 {
+		t.Fatalf("prompt token delta mismatch: got=%d want=3", got)
+	}
+	if got := after.CompletionTokens - before.CompletionTokens; got != 2 {
+		t.Fatalf("completion token delta mismatch: got=%d want=2", got)
 	}
 }
 
@@ -1502,5 +1612,45 @@ func TestUpstreamNon2xxStreamLogsWithoutReadingBody(t *testing.T) {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("expected %s in logs, got=%s", want, logs)
 		}
+	}
+}
+
+func TestUpstreamNon2xxJSONForStreamRequestIsTreatedAsNonStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "zstd")
+		w.Header().Set("Content-Length", "17")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":"quota"}`)
+	}))
+	defer upstream.Close()
+
+	cfg := config.Config{
+		Server:    config.ServerConfig{UpstreamTimeout: 30 * time.Second},
+		Router:    config.RouterConfig{Strategy: "round_robin", DefaultProvider: "p1"},
+		Providers: []config.ProviderConfig{{Name: "p1", BaseURL: upstream.URL}},
+	}
+
+	server, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"test","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != `{"error":"quota"}` {
+		t.Fatalf("expected JSON error body passthrough, got=%q", rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Encoding"); got != "" {
+		t.Fatalf("expected non-SSE error response to clear Content-Encoding, got %q", got)
+	}
+	if got := rr.Header().Get("Content-Length"); got != "" {
+		t.Fatalf("expected non-SSE error response to clear Content-Length, got %q", got)
 	}
 }

@@ -117,13 +117,18 @@ func (s *Selector) Select(input SelectionInput) (config.ProviderConfig, error) {
 		return config.ProviderConfig{}, fmt.Errorf("forced provider %q is not available", input.ForcedProvider)
 	}
 
+	matchedRule := false
 	for _, rule := range s.rules {
 		if ruleMatches(rule, input.Path, input.Model) {
+			matchedRule = true
 			candidates := filterExcluded(rule.providers, excluded)
 			if len(candidates) > 0 {
 				return s.pick(candidates)
 			}
 		}
+	}
+	if matchedRule {
+		return config.ProviderConfig{}, errors.New("no provider candidates")
 	}
 
 	if input.Model != "" {

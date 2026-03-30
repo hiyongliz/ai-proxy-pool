@@ -62,6 +62,7 @@ func (s *Server) buildUpstreamRequest(inReq *http.Request, body []byte, provider
 	applyProviderAuth(outReq, provider)
 	applyProviderStaticHeaders(outReq, provider)
 	outReq.Header.Del(s.cfg.Router.HeaderProviderKey)
+	outReq.Header.Del("Accept-Encoding")
 
 	return outReq, nil
 }
@@ -218,6 +219,23 @@ func isNetworkError(err error) bool {
 	return false
 }
 
+func responseShouldStream(requestBody []byte, requestPath string, statusCode int, contentType string) bool {
+	if requestPath == "/v1/messages/count_tokens" {
+		return false
+	}
+
+	contentType = strings.ToLower(contentType)
+	if strings.Contains(contentType, "text/event-stream") {
+		return true
+	}
+
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return false
+	}
+
+	return requestStreamOrDefault(requestBody, false)
+}
+
 // doUpstreamRequest 执行上游请求，返回 (HTTP状态码, 错误)。
 // 如果成功写入响应，错误为 nil；否则返回错误供重试决策。
 func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body []byte, model string, selected config.ProviderConfig, attempt, maxAttempts int) (int, error) {
@@ -305,13 +323,7 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 	metrics.ProviderRequestDuration.WithLabelValues(selected.Name, modelLabel).Observe(time.Since(upstreamStart).Seconds())
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		isStream := requestStreamOrDefault(body, false)
-		if r.URL.Path == "/v1/messages/count_tokens" {
-			isStream = false
-		}
-		if contentType := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(contentType, "text/event-stream") {
-			isStream = true
-		}
+		isStream := responseShouldStream(body, r.URL.Path, resp.StatusCode, resp.Header.Get("Content-Type"))
 
 		if !isStream {
 			rawBody, readErr := io.ReadAll(resp.Body)
@@ -383,13 +395,7 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 	}
 
 	if shouldTranslateResponse(selected) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		isStream := requestStreamOrDefault(body, false)
-		if r.URL.Path == "/v1/messages/count_tokens" {
-			isStream = false
-		}
-		if contentType := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(contentType, "text/event-stream") {
-			isStream = true
-		}
+		isStream := responseShouldStream(body, r.URL.Path, resp.StatusCode, resp.Header.Get("Content-Type"))
 
 		var written int64
 		if isStream {
@@ -450,13 +456,7 @@ func (s *Server) doUpstreamRequest(w http.ResponseWriter, r *http.Request, body 
 		w.Header().Set("X-Selected-Provider", selected.Name)
 	}
 
-	isStream := requestStreamOrDefault(body, false)
-	if r.URL.Path == "/v1/messages/count_tokens" {
-		isStream = false
-	}
-	if contentType := strings.ToLower(resp.Header.Get("Content-Type")); strings.Contains(contentType, "text/event-stream") {
-		isStream = true
-	}
+	isStream := responseShouldStream(body, r.URL.Path, resp.StatusCode, resp.Header.Get("Content-Type"))
 
 	if r.Method == http.MethodHead || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified {
 		w.WriteHeader(resp.StatusCode)

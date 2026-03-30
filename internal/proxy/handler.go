@@ -91,6 +91,11 @@ func (s *Server) Handler() http.Handler {
 	return s.handler
 }
 
+// Stats returns the server stats store.
+func (s *Server) Stats() *GlobalStats {
+	return s.stats
+}
+
 func (s *Server) buildHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)

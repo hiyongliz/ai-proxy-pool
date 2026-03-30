@@ -22,6 +22,11 @@ func (h *ReloadableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.current.Load().Handler().ServeHTTP(w, r)
 }
 
+// Current returns the active server instance.
+func (h *ReloadableHandler) Current() *Server {
+	return h.current.Load()
+}
+
 // Reload atomically swaps in a new server configuration.
 // It closes idle connections on the old server to avoid leaking resources.
 func (h *ReloadableHandler) Reload(s *Server) {
